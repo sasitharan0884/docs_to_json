@@ -526,6 +526,9 @@ class Section11StructuredExtractor:
         exec_order = 0
         evidence_order = 0
 
+        # All 5 subsection slots that must be present as Heading 3
+        REQUIRED_H3S = {"name", "description", "execution", "observation", "evidence"}
+
         def new_test_case(heading_text: str) -> Dict[str, Any]:
             return {
                 "test_case_heading": heading_text.strip(),
@@ -535,14 +538,30 @@ class Section11StructuredExtractor:
                 "execution": [],
                 "test_observation": "",
                 "evidence_provided": [],
+                "_found_h3s": set(),  # tracks properly-styled H3 slots
             }
 
         def flush_tc():
             nonlocal current_tc
-            if current_tc and (current_tc["test_case_id"] or current_tc["test_case_heading"]):
-                current_tc["test_case_name"] = current_tc["test_case_name"].strip()
+            if not current_tc:
+                return
+            if not (current_tc["test_case_id"] or current_tc["test_case_heading"]):
+                return
+            found_h3s = current_tc.pop("_found_h3s", set())
+            missing_h3s = REQUIRED_H3S - found_h3s
+            if missing_h3s:
+                # One or more H3 subsections absent/unstyled → emit FAIL stub only
+                test_cases.append({
+                    "test_case_heading":  current_tc["test_case_heading"],
+                    "test_case_id":       current_tc["test_case_id"],
+                    "status":             "FAIL",
+                    "missing_subsections": sorted(missing_h3s),
+                })
+            else:
+                current_tc["test_case_name"]        = current_tc["test_case_name"].strip()
                 current_tc["test_case_description"] = current_tc["test_case_description"].strip()
-                current_tc["test_observation"] = current_tc["test_observation"].strip()
+                current_tc["test_observation"]      = current_tc["test_observation"].strip()
+                current_tc.pop("_found_h3s", None)
                 test_cases.append(current_tc)
 
         for item in section_content:
@@ -566,6 +585,8 @@ class Section11StructuredExtractor:
 
             if item_type == "paragraph" and style == "Heading 3":
                 current_sub = cls._map_heading3(text)
+                if current_sub:
+                    current_tc["_found_h3s"].add(current_sub)  # record properly-styled H3
                 continue
 
             if current_sub is None:
