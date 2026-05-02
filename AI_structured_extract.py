@@ -1,0 +1,1075 @@
+"""
+AI Structured JSON Builder (Clean Single-File Version)
+------------------------------------------------------
+This is the cleaned, final AI_structured_extract.py with:
+- ONE StructuredSectionBuilder (no duplicates)
+- Section 8.1 / 8.4 / 9 scenario boundaries driven by bold_formatting
+- Section 11 uses Heading 2 as test case boundary and Heading 3 as subsections
+- Section 12 parses results table
+- Other sections remain structured as content lists
+
+IMPORTANT ENFORCED FORMAT (per your rule):
+- Section 8.1: only scenario token is bold (bold_formatting contains only that token)
+- Section 8.4: entire scenario header line is bold (bold_formatting contains full header line)
+- Section 9: only scenario token is bold (bold_formatting contains only that token)
+"""
+
+import json
+import sys
+import re
+from pathlib import Path
+from typing import Dict, Any, List, Optional, Tuple
+
+
+# -------------------------------------------------
+# Scenario header pattern: only these bold texts start a new scenario
+# -------------------------------------------------
+SCENARIO_HEADER_RE = re.compile(
+    r"^\s*test\s*(scenario|case)s?\s+\d+(?:\.\d+){2,}\b",
+    re.IGNORECASE
+)
+
+# -------------------------------------------------
+# NAME-ONLY NORMALISATION HELPERS
+# -------------------------------------------------
+NUM_PREFIX_RE = re.compile(r"^\s*\d+(?:\.\d+)*\s*[\.):]?\s*")
+
+
+def strip_num_prefix(text: str) -> str:
+    """Remove leading numbering like '8.', '7.', '8.1.' from text."""
+    return NUM_PREFIX_RE.sub("", (text or "").strip())
+
+
+def norm_name(text: str) -> str:
+    """Normalize section name only — ignore numbering and punctuation."""
+    t = strip_num_prefix(text)
+    t = t.strip().lower()
+    t = re.sub(r"[\u2010-\u2015]", "-", t)   # normalize dashes
+    t = re.sub(r"[^a-z0-9]+", " ", t)        # keep only alphanum
+    return re.sub(r"\s+", " ", t).strip()
+
+
+def normalize_test_case_id(value: str) -> str:
+    """Normalize test case ID by stripping trailing punctuation and whitespace."""
+    if not value:
+        return value
+    cleaned = value.strip()
+    cleaned = re.sub(r'[:;.\s]+$', '', cleaned)
+    return cleaned
+
+
+def strip_scenario_header_text(text: str, bold_token: Optional[str]) -> str:
+    """Return content after scenario header while tolerating formatting differences."""
+    raw = (text or "").strip()
+    if not raw:
+        return ""
+
+    token = (bold_token or "").strip()
+    remainder = raw
+
+    if token and raw.lower().startswith(token.lower()):
+        remainder = raw[len(token):].strip()
+    else:
+        m = SCENARIO_HEADER_RE.match(raw)
+        if m:
+            remainder = raw[m.end():].strip()
+
+    return re.sub(r'^[:\-\s]+', '', remainder).strip()
+
+
+def strip_leading_bullet_symbol(text: str) -> str:
+    """Remove leading bullet/list symbols like '' from tool lines."""
+    cleaned = (text or "").strip()
+    cleaned = re.sub(r'^\s*[\u2022\u2023\u25E6\u2043\u2219\u25AA\u25CF\u25A0\uF0B7\u00B7]+\s*', '', cleaned)
+    cleaned = re.sub(r'^\s*[-*]+\s*', '', cleaned)
+    return cleaned.strip()
+
+
+# -------------------------------------------------
+# DATA STRUCTURES
+# -------------------------------------------------
+class FrontPage:
+    def __init__(self):
+        self.section_id = "FP-01"
+        self.content: List[Any] = []
+
+    def to_dict(self):
+        return {"section_id": self.section_id, "content": self.content}
+
+
+class Section:
+    def __init__(self, section_id: str, title: str, level: int):
+        self.section_id = section_id
+        self.title = title
+        self.level = level
+        self.content: List[Dict[str, Any]] = []
+        self.structured_data: Optional[Dict[str, Any]] = None
+        self.extracted: bool = False
+    def to_dict(self):
+        out = {"section_id": self.section_id, "title": self.title, "level": self.level}
+        if self.structured_data is not None:
+            out.update(self.structured_data)
+        else:
+            # Strip internal keys (style, bold_formatting) from content items
+            cleaned = []
+            for item in self.content:
+                if isinstance(item, dict):
+                    cleaned.append({k: v for k, v in item.items() if k not in ("style", "bold_formatting")})
+                else:
+                    cleaned.append(item)
+            out["content"] = cleaned
+        return out
+
+
+class DocumentJSON:
+    def __init__(self, document_name: str):
+        self.document = document_name
+        self.frontpage_data: Optional[FrontPage] = None
+        self.sections: List[Section] = []
+
+    def to_dict(self):
+        return {
+            "document": self.document,
+            "frontpage_data": self.frontpage_data.to_dict() if self.frontpage_data else None,
+            "sections": [s.to_dict() for s in self.sections],
+        }
+
+
+# -------------------------------------------------
+# STRUCTURED EXTRACTORS
+# -------------------------------------------------
+class Section1StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        details = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "paragraph":
+                text = (item.get("text") or "").strip()
+                if text:
+                    details.append(text)
+            elif itype == "image":
+                details.append({"type": "image", "image_path": item.get("image_path", "")})
+        return {"itsar_section_details": details}
+
+
+class Section2StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        elements = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "paragraph":
+                text = (item.get("text") or "").strip()
+                if text:
+                    elements.append(text)
+            elif itype == "image":
+                elements.append({"type": "image", "image_path": item.get("image_path", "")})
+        return {"security_requirement": elements}
+
+
+class Section3StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        elements = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "paragraph":
+                text = (item.get("text") or "").strip()
+                if text:
+                    elements.append(text)
+            elif itype == "image":
+                elements.append({"type": "image", "image_path": item.get("image_path", "")})
+        return {"requirement_description": elements}
+
+
+class Section4StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        dut_details = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "paragraph":
+                text = (item.get("text") or "").strip()
+                if text:
+                    dut_details.append({"type": "paragraph", "text": text})
+            elif item_type == "table":
+                rows = item.get("rows", [])
+                if not rows or len(rows) < 2:
+                    continue
+                dut_details.append({
+                    "type": "table",
+                    "headers": [cell.strip() for cell in rows[0]],
+                    "rows": [[cell.strip() for cell in row] for row in rows[1:]],
+                })
+            elif item_type == "image":
+                dut_details.append({"type": "image", "image_path": item.get("image_path", "")})
+        return {"dut_details": dut_details}
+
+
+class Section5StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        lines = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            item_type = item.get("type")
+            if item_type == "paragraph":
+                text = (item.get("text") or "").strip()
+                if text:
+                    lines.append(text)
+            elif item_type == "table":
+                rows = item.get("rows", [])
+                for row in rows:
+                    row_text = " | ".join([str(cell).strip() for cell in row if cell is not None]).strip()
+                    if row_text:
+                        lines.append(row_text)
+        return {"dut_configuration": "\n".join(lines).strip()}
+
+
+class Section6StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        preconditions = []
+        order = 0
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "paragraph":
+                text = (item.get("text") or "").strip()
+                if text:
+                    preconditions.append({"precondition": text, "order": order})
+                    order += 1
+            elif itype == "image":
+                preconditions.append({"type": "image", "image_path": item.get("image_path", ""), "order": order})
+                order += 1
+        return {"preconditions": preconditions, "total_preconditions": len(preconditions)}
+
+
+class Section83StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        tools = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type")
+            if itype == "paragraph":
+                text = (item.get("text") or "").strip()
+                if not text:
+                    continue
+                cleaned_tool = strip_leading_bullet_symbol(text)
+                if cleaned_tool:
+                    tools.append({"tool": cleaned_tool})
+            elif itype == "image":
+                tools.append({"type": "image", "image_path": item.get("image_path", "")})
+        return {"tools": tools, "total_tools": len([t for t in tools if isinstance(t, dict) and "tool" in t])}
+
+
+class Section81StructuredExtractor:
+    """
+    Section 8.1:
+    - A new scenario begins when bold_formatting is present (token-only bold)
+    - Remaining text (after removing bold token) belongs to description
+    """
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        test_scenarios = []
+        current_scenario = None
+        current_desc = ""
+
+        def flush():
+            nonlocal current_scenario, current_desc
+            if current_scenario:
+                test_scenarios.append({
+                    "test_scenario": current_scenario,
+                    "description": current_desc.strip()
+                })
+            current_scenario = None
+            current_desc = ""
+
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            itype = item.get("type", "")
+            bold = (item.get("bold_formatting") or "").strip()
+            text = (item.get("text") or "").strip()
+
+            if itype == "paragraph":
+                if not text:
+                    continue
+                if bold and SCENARIO_HEADER_RE.match(text):
+                    flush()
+                    current_scenario = (bold or "").strip() or text
+                    remaining = strip_scenario_header_text(text, bold)
+                    if remaining:
+                        current_desc = remaining + " "
+                    continue
+                if current_scenario:
+                    current_desc += text + " "
+            elif itype == "table" and current_scenario:
+                current_desc += f"[Table with {len(item.get('rows', []))} rows] "
+            elif itype == "image" and current_scenario:
+                current_desc += f"[Image: {item.get('image_path', '')}] "
+
+        flush()
+        return {"test_scenarios": test_scenarios, "total_test_scenarios": len(test_scenarios)}
+
+
+class Section84StructuredExtractor:
+    """
+    Section 8.4:
+    - Entire scenario header line is bold (bold_formatting contains full header)
+    - New scenario when bold_formatting exists
+    - Subsequent items become steps until next bold header
+    """
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        execution_steps = []
+        current_scenario = None
+        current_steps = []
+        order = 0
+
+        def flush():
+            nonlocal current_scenario, current_steps, order
+            if current_scenario:
+                execution_steps.append({"test_scenario": current_scenario, "steps": current_steps})
+            current_scenario = None
+            current_steps = []
+            order = 0
+
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+
+            itype = item.get("type", "")
+            bold = (item.get("bold_formatting") or "").strip()
+            text = (item.get("text") or "").strip()
+
+            if itype == "paragraph":
+                if not text:
+                    continue
+                if bold and SCENARIO_HEADER_RE.match(text):
+                    flush()
+                    current_scenario = (bold or "").strip() or text
+                    remaining = strip_scenario_header_text(text, bold)
+                    if remaining:
+                        current_steps.append({"step": remaining, "order": order})
+                        order += 1
+                    continue
+                if current_scenario:
+                    current_steps.append({"step": text, "order": order})
+                    order += 1
+
+            elif itype == "table" and current_scenario:
+                current_steps.append({"step": "Table", "table": item.get("rows", []), "order": order})
+                order += 1
+
+            elif itype == "image" and current_scenario:
+                current_steps.append({"type": "image", "image_path": item.get("image_path", ""), "order": order})
+                order += 1
+
+        flush()
+        return {"execution_steps": execution_steps, "total_execution_steps": len(execution_steps)}
+
+
+class Section9StructuredExtractor:
+    """
+    Section 9:
+    - New expected-result entry when bold_formatting exists (token-only bold)
+    - Remaining text (after removing bold token) belongs to expected_result
+    """
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        expected_results = []
+        current_id = None
+        current_text = ""
+
+        def flush():
+            nonlocal current_id, current_text
+            if current_id:
+                expected_results.append({
+                    "test_case_id": current_id,
+                    "expected_result": current_text.strip()
+                })
+            current_id = None
+            current_text = ""
+
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+
+            itype = item.get("type", "")
+            bold = (item.get("bold_formatting") or "").strip()
+            text = (item.get("text") or "").strip()
+
+            if itype == "paragraph":
+                if not text:
+                    continue
+                if bold and SCENARIO_HEADER_RE.match(text):
+                    flush()
+                    current_id = (bold or "").strip() or text
+                    remaining = strip_scenario_header_text(text, bold)
+                    current_text = (remaining + " ") if remaining else ""
+                    continue
+                if current_id:
+                    current_text += text + " "
+
+            elif itype == "image" and current_id:
+                current_text += f"[Image: {item.get('image_path', '')}] "
+
+        flush()
+
+        if not expected_results:
+            all_text = " ".join(
+                (it.get("text") or "").strip()
+                for it in section_content
+                if isinstance(it, dict) and it.get("type") == "paragraph"
+            ).strip()
+            if all_text:
+                expected_results.append({"test_case_id": "all", "expected_result": all_text})
+
+        return {
+            "expected_results": expected_results,
+            "total_expected_results": len([r for r in expected_results if "test_case_id" in r])
+        }
+
+
+class Section12StructuredExtractor:
+    @staticmethod
+    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+        test_results = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            if item.get("type") == "table":
+                rows = item.get("rows", [])
+                for row in rows[1:] if len(rows) > 1 else []:
+                    if len(row) >= 4:
+                        # row[0] = test case ID/number, row[1] = name, row[2] = result, row[3] = remarks
+                        test_case_id  = normalize_test_case_id((row[0] or "").strip())
+                        test_case_name = (row[1] or "").strip()
+                        result_status  = re.sub(r"\s+", " ", (row[2] or "").strip())
+                        remarks        = (row[3] or "").strip()
+                        if test_case_id or test_case_name:
+                            test_results.append({
+                                "test_case_id":   test_case_id,
+                                "test_case_name": test_case_name,
+                                "result":         result_status,
+                                "remarks":        remarks,
+                            })
+            elif item.get("type") == "image":
+                test_results.append({"type": "image", "image_path": item.get("image_path", "")})
+
+        return {
+            "test_results": test_results,
+            "total_results": len([r for r in test_results if isinstance(r, dict) and r.get("test_case_id")])
+        }
+
+
+class Section11StructuredExtractor:
+    """Heading 2 = test case title, Heading 3 = a-e subsections"""
+
+    _TC_PATTERNS = [
+        re.compile(r'TC-(\d+(?:\.\d+){3})'),
+        re.compile(r'(\d+(?:\.\d+){3})'),
+    ]
+
+    @classmethod
+    def _extract_tc_id(cls, text: str) -> str:
+        for pat in cls._TC_PATTERNS:
+            m = pat.search(text or "")
+            if m:
+                return normalize_test_case_id(m.group(0))
+        return ""
+
+    @staticmethod
+    def _map_heading3(text: str) -> Optional[str]:
+        t = (text or "").strip().lower()
+        if re.match(r'^a[\s\.\)]', t) and 'test case name' in t:
+            return 'name'
+        if re.match(r'^b[\s\.\)]', t) and 'test case description' in t:
+            return 'description'
+        if re.match(r'^c[\s\.\)]', t) and 'execution' in t:
+            return 'execution'
+        if re.match(r'^d[\s\.\)]', t) and 'observation' in t:
+            return 'observation'
+        if re.match(r'^e[\s\.\)]', t) and 'evidence' in t:
+            return 'evidence'
+        if 'test case name' in t and 'description' not in t:
+            return 'name'
+        if 'test case description' in t:
+            return 'description'
+        if 'execution' in t:
+            return 'execution'
+        if 'observation' in t:
+            return 'observation'
+        if 'evidence' in t:
+            return 'evidence'
+        return None
+
+    @classmethod
+    def extract(cls, section_content: List[Dict]) -> Dict[str, Any]:
+        test_cases: List[Dict[str, Any]] = []
+        current_tc: Optional[Dict[str, Any]] = None
+        current_sub: Optional[str] = None
+        exec_order = 0
+        evidence_order = 0
+
+        def new_test_case(heading_text: str) -> Dict[str, Any]:
+            return {
+                "test_case_heading": heading_text.strip(),
+                "test_case_id": cls._extract_tc_id(heading_text),
+                "test_case_name": "",
+                "test_case_description": "",
+                "execution": [],
+                "test_observation": "",
+                "evidence_provided": [],
+            }
+
+        def flush_tc():
+            nonlocal current_tc
+            if current_tc and (current_tc["test_case_id"] or current_tc["test_case_heading"]):
+                current_tc["test_case_name"] = current_tc["test_case_name"].strip()
+                current_tc["test_case_description"] = current_tc["test_case_description"].strip()
+                current_tc["test_observation"] = current_tc["test_observation"].strip()
+                test_cases.append(current_tc)
+
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+
+            item_type = item.get("type", "")
+            style = item.get("style", "")
+            text = (item.get("text") or "").strip()
+
+            if item_type == "paragraph" and style == "Heading 2":
+                flush_tc()
+                current_tc = new_test_case(text)
+                current_sub = None
+                exec_order = 0
+                evidence_order = 0
+                continue
+
+            if current_tc is None:
+                continue
+
+            if item_type == "paragraph" and style == "Heading 3":
+                current_sub = cls._map_heading3(text)
+                continue
+
+            if current_sub is None:
+                if item_type == "paragraph" and text and not current_tc["test_case_id"]:
+                    cand = cls._extract_tc_id(text)
+                    if cand:
+                        current_tc["test_case_id"] = cand
+                continue
+
+            if current_sub == "name":
+                if item_type == "paragraph" and text:
+                    current_tc["test_case_name"] += text + " "
+            elif current_sub == "description":
+                if item_type == "paragraph" and text:
+                    current_tc["test_case_description"] += text + " "
+            elif current_sub == "execution":
+                if item_type == "paragraph" and text:
+                    current_tc["execution"].append({"order": exec_order, "step": text})
+                    exec_order += 1
+                elif item_type == "image":
+                    current_tc["execution"].append({"order": exec_order, "type": "image", "image_path": item.get("image_path", "")})
+                    exec_order += 1
+                elif item_type == "table":
+                    current_tc["execution"].append({"order": exec_order, "type": "table", "rows": item.get("rows", [])})
+                    exec_order += 1
+            elif current_sub == "observation":
+                if item_type == "paragraph" and text:
+                    current_tc["test_observation"] += text + " "
+            elif current_sub == "evidence":
+                if item_type == "paragraph" and text:
+                    current_tc["evidence_provided"].append({"order": evidence_order, "evidence": text})
+                    evidence_order += 1
+                elif item_type == "image":
+                    current_tc["evidence_provided"].append({"order": evidence_order, "type": "image", "image_path": item.get("image_path", "")})
+                    evidence_order += 1
+                elif item_type == "table":
+                    current_tc["evidence_provided"].append({"order": evidence_order, "evidence": "[Table]"})
+                    evidence_order += 1
+
+        flush_tc()
+        return {"test_cases": test_cases, "total_test_cases": len(test_cases)}
+
+
+# -------------------------------------------------
+# ENHANCED SECTION BUILDER (SINGLE)
+# -------------------------------------------------
+class StructuredSectionBuilder:
+    STRICT_SECTIONS = [
+        "1. ITSAR Section No & Name",
+        "2. Security Requirement No & Name",
+        "3. Requirement Description",
+        "4. DUT Confirmation Details",
+        "5. DUT Configuration",
+        "6. Preconditions",
+        "7. Test Objective",
+        "8. Test Plan",
+        "8.1. Number of Test Scenarios",
+        "8.2. Test Bed Diagram",
+        "8.3. Tools Required",
+        "8.4. Test Execution Steps",
+        "9. Expected Results for Pass",
+        "10. Expected Format of Evidence",
+        "11. Test Execution",
+        "12. Test Case Result",
+    ]
+
+    STRICT_ALIASES = {
+        norm_name("ITSAR Section No & Name"): "1. ITSAR Section No & Name",
+        norm_name("Security Requirement No & Name"): "2. Security Requirement No & Name",
+        norm_name("Requirement Description"): "3. Requirement Description",
+        norm_name("DUT Confirmation Details"): "4. DUT Confirmation Details",
+        norm_name("DUT Details"): "4. DUT Confirmation Details",
+        norm_name("DUT Configuration"): "5. DUT Configuration",
+        norm_name("Preconditions"): "6. Preconditions",
+        norm_name("Test Objective"): "7. Test Objective",
+        norm_name("Test Plan"): "8. Test Plan",
+        norm_name("Number of Test Scenarios"): "8.1. Number of Test Scenarios",
+        norm_name("Test Bed Diagram"): "8.2. Test Bed Diagram",
+        norm_name("Tools Required"): "8.3. Tools Required",
+        norm_name("Test Execution Steps"): "8.4. Test Execution Steps",
+        norm_name("Expected Results for Pass"): "9. Expected Results for Pass",
+        norm_name("Expected Results"): "9. Expected Results for Pass",
+        norm_name("Expected Format of Evidence"): "10. Expected Format of Evidence",
+        norm_name("Test Execution"): "11. Test Execution",
+        norm_name("Test Case Result"): "12. Test Case Result",
+        norm_name("Test Case Results"): "12. Test Case Result",
+    }
+
+    def __init__(self, document_name: str):
+        self.output = DocumentJSON(document_name)
+        self.frontpage = FrontPage()
+        self.current_section: Optional[Section] = None
+        self.section_counter = 1
+        self.frontpage_done = False
+        self.in_sec11 = False
+
+    def _next_section_id(self) -> str:
+        sid = f"SEC-{self.section_counter:02d}"
+        self.section_counter += 1
+        return sid
+
+    @staticmethod
+    def _key_to_section_id(key: str) -> str:
+        """Map a split-map key to a deterministic section_id.
+
+        Mapping:
+          front_page  → SEC-0
+          sec1…sec12  → SEC-1…SEC-12
+          sec8_1…sec8_4 → SEC-8-1…SEC-8-4
+          tc_1, tc_2… → SEC-11-1, SEC-11-2… (resolved at call site)
+        """
+        if key == "front_page":
+            return "SEC-0"
+        import re
+        m8 = re.match(r'^sec8_(\d+)$', key)
+        if m8:
+            return f"SEC-8-{m8.group(1)}"
+        m = re.match(r'^sec(\d+)$', key)
+        if m:
+            return f"SEC-{m.group(1)}"
+        # tc_N  →  handled in build_from_map after numbered
+        mtc = re.match(r'^tc_(\d+)$', key)
+        if mtc:
+            return f"SEC-11-{mtc.group(1)}"
+        return f"SEC-{key}"
+
+    def _match_strict_by_name(self, text: str) -> Optional[str]:
+        n = norm_name(text)
+        if not n:
+            return None
+        if n in self.STRICT_ALIASES:
+            return self.STRICT_ALIASES[n]
+        for s in self.STRICT_SECTIONS:
+            if norm_name(s) == n:
+                return s
+        return None
+
+    def _detect_heading(self, block: Dict[str, Any]) -> Tuple[bool, Optional[int], Optional[str]]:
+        if block.get("type") != "paragraph":
+            return False, None, None
+
+        style = block.get("style", "")
+        raw = (block.get("text") or "").strip()
+        if not raw:
+            return False, None, None
+
+        if style not in {"Heading 1", "Heading 2"}:
+            return False, None, None
+
+        canonical = self._match_strict_by_name(raw)
+        level = 1 if style == "Heading 1" else 2
+        title = canonical if canonical else raw
+        return True, level, title
+
+    def _get_section_type(self, title: str) -> str:
+        n = norm_name(title)
+        if n == norm_name("Number of Test Scenarios"):
+            return "section_8_1"
+        if n == norm_name("Test Execution Steps"):
+            return "section_8_4"
+        if n == norm_name("Expected Results for Pass") or n == norm_name("Expected Results"):
+            return "section_9"
+        if n == norm_name("Tools Required"):
+            return "section_8_3"
+        if n == norm_name("Preconditions"):
+            return "section_6"
+        if n == norm_name("Test Execution"):
+            return "section_11"
+        if n == norm_name("Test Case Result") or n == norm_name("Test Case Results"):
+            return "section_12"
+        if n == norm_name("DUT Configuration"):
+            return "section_5"
+        if n == norm_name("DUT Confirmation Details") or n == norm_name("DUT Details"):
+            return "section_4"
+        if n == norm_name("ITSAR Section No & Name"):
+            return "section_1"
+        if n == norm_name("Security Requirement No & Name"):
+            return "section_2"
+        if n == norm_name("Requirement Description"):
+            return "section_3"
+        return "standard"
+
+    def _apply_structured_extraction(self, section: Section):
+        if section.extracted:
+            return
+
+        stype = self._get_section_type(section.title)
+
+        if stype == "section_8_1":
+            section.structured_data = Section81StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_8_4":
+            section.structured_data = Section84StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_9":
+            section.structured_data = Section9StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_8_3":
+            section.structured_data = Section83StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_6":
+            section.structured_data = Section6StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_11":
+            section.structured_data = Section11StructuredExtractor.extract(section.content)
+            section.content = []
+            section.extracted = True
+        elif stype == "section_12":
+            section.structured_data = Section12StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_5":
+            section.structured_data = Section5StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_4":
+            section.structured_data = Section4StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_1":
+            section.structured_data = Section1StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_2":
+            section.structured_data = Section2StructuredExtractor.extract(section.content)
+            section.content = []
+        elif stype == "section_3":
+            section.structured_data = Section3StructuredExtractor.extract(section.content)
+            section.content = []
+
+    def build(self, raw_blocks: List[Dict[str, Any]]) -> DocumentJSON:
+        for block in raw_blocks:
+            is_heading, level, title = self._detect_heading(block)
+
+            if is_heading:
+                if not self.frontpage_done:
+                    self.frontpage_done = True
+
+                # If inside Section 11, absorb Heading 2/3 as content (for Section11StructuredExtractor)
+                # Only break out when we hit a new Heading 1 (e.g. Section 12)
+                if self.in_sec11:
+                    if level == 1:
+                        # Leaving Section 11 — close it and proceed
+                        if self.current_section:
+                            self._apply_structured_extraction(self.current_section)
+                        self.in_sec11 = False
+                        # Fall through to create new section below
+                    else:
+                        # Heading 2 or 3 inside section 11 — add as content
+                        if self.current_section is not None:
+                            self.current_section.content.append({
+                                "type": "paragraph",
+                                "text": block.get("text", ""),
+                                "style": block.get("style", ""),
+                                "bold_formatting": block.get("bold_formatting"),
+                            })
+                        continue
+
+                if not self.in_sec11:
+                    if self.current_section:
+                        if self._get_section_type(self.current_section.title) != "standard":
+                            self._apply_structured_extraction(self.current_section)
+
+                section = Section(section_id=self._next_section_id(), title=title, level=level)
+                self.output.sections.append(section)
+                self.current_section = section
+
+                # Track if we just entered Section 11
+                if self._get_section_type(title) == "section_11":
+                    self.in_sec11 = True
+
+                continue
+
+            if not self.frontpage_done:
+                if block.get("type") == "paragraph" and (block.get("text") or "").strip():
+                    self.frontpage.content.append(block.get("text"))
+                continue
+
+            if self.current_section is None:
+                continue
+
+            btype = block.get("type")
+
+            if btype == "paragraph":
+                txt = block.get("text") or ""
+                sty = block.get("style") or ""
+                if txt.strip() or sty.startswith("Heading"):
+                    self.current_section.content.append({
+                        "type": "paragraph",
+                        "text": txt,
+                        "style": sty,
+                        "bold_formatting": block.get("bold_formatting"),
+                    })
+
+            elif btype == "image":
+                self.current_section.content.append({
+                    "type": "image",
+                    "image_path": block.get("path", ""),
+                })
+
+            elif btype == "table":
+                self.current_section.content.append({
+                    "type": "table",
+                    "rows": block.get("rows", []),
+                    "style": block.get("style", ""),
+                })
+
+        if self.current_section:
+            if self._get_section_type(self.current_section.title) != "standard":
+                self._apply_structured_extraction(self.current_section)
+
+        self.output.frontpage_data = self.frontpage
+        return self.output
+
+    # ------------------------------------------------------------------
+    # NEW: Map-driven build — validator owns structure, extractor owns content
+    # ------------------------------------------------------------------
+    def build_from_map(self, mapped_sections: Dict[str, List[Dict[str, Any]]]) -> "DocumentJSON":
+        """
+        Build structured output directly from pre-sliced mapped_sections produced
+        by document_split_validator.build_mapped_sections().
+
+        Each mapped_sections[key] is a list of raw lossless blocks for that section.
+        Index [0] is always the heading block; content starts at index [1].
+
+        This method:
+          - Does NOT re-scan the full document.
+          - Does NOT re-detect headings.
+          - Calls each section's typed extractor on its exact block slice only.
+          - Completely eliminates section-bleed between adjacent sections.
+        """
+        # Section key → canonical title + level
+        SEC_META: Dict[str, tuple] = {
+            "front_page": ("[Front Page]", 0),
+            "sec1":  ("1. ITSAR Section No & Name",           1),
+            "sec2":  ("2. Security Requirement No & Name",    1),
+            "sec3":  ("3. Requirement Description",           1),
+            "sec4":  ("4. DUT Confirmation Details",          1),
+            "sec5":  ("5. DUT Configuration",                 1),
+            "sec6":  ("6. Preconditions",                     1),
+            "sec7":  ("7. Test Objective",                    1),
+            "sec8":  ("8. Test Plan",                         1),
+            "sec8_1": ("8.1. Number of Test Scenarios",       2),
+            "sec8_2": ("8.2. Test Bed Diagram",               2),
+            "sec8_3": ("8.3. Tools Required",                 2),
+            "sec8_4": ("8.4. Test Execution Steps",           2),
+            "sec9":  ("9. Expected Results for Pass",         1),
+            "sec10": ("10. Expected Format of Evidence",      1),
+            "sec11": ("11. Test Execution",                   1),
+            "sec12": ("12. Test Case Result",                 1),
+        }
+
+        # Helper: convert a raw block slice (starting at idx 1) into content dicts
+        def _to_content(raw_slice: List[Dict[str, Any]]) -> List[Dict[str, Any]]:
+            content = []
+            for b in raw_slice[1:]:          # skip heading block
+                btype = b.get("type", "")
+                if btype == "paragraph":
+                    content.append({
+                        "type": "paragraph",
+                        "text": b.get("text", ""),
+                        "style": b.get("style", ""),
+                        "bold_formatting": b.get("bold_formatting"),
+                    })
+                elif btype == "table":
+                    content.append({"type": "table", "rows": b.get("rows", [])})
+                elif btype == "image":
+                    content.append({"type": "image", "image_path": b.get("path", "")})
+            return content
+
+        # Front-page
+        fp_blocks = mapped_sections.get("front_page", [])
+        for b in fp_blocks:
+            if b.get("type") == "paragraph":
+                t = (b.get("text") or "").strip()
+                if t:
+                    self.frontpage.content.append(t)
+        self.frontpage_done = True
+        self.output.frontpage_data = self.frontpage
+
+        # Ordered rendering: sec1 … sec12, each with possible sub-sections
+        ORDERED_KEYS = [
+            "sec1", "sec2", "sec3", "sec4", "sec5", "sec6", "sec7",
+            "sec8", "sec8_1", "sec8_2", "sec8_3", "sec8_4",
+            "sec9", "sec10", "sec11", "sec12",
+        ]
+
+        # Collect tc_* keys for Section 11 test cases, sorted
+        tc_keys = sorted(
+            [k for k in mapped_sections if k.startswith("tc_")],
+            key=lambda k: int(k.split("_")[1]),
+        )
+
+        # Track which sec11 tc blocks have already been rendered inside sec11
+        rendered_tc = set()
+
+        for key in ORDERED_KEYS:
+            raw_slice = mapped_sections.get(key)
+            if raw_slice is None:
+                continue
+
+            meta = SEC_META.get(key, (key, 1))
+            canonical_title = meta[0]
+            level = meta[1]
+
+            # Get content (skip heading at [0])
+            content = _to_content(raw_slice)
+
+            section = Section(
+                section_id=self._key_to_section_id(key),
+                title=canonical_title,
+                level=level,
+            )
+
+            stype = self._get_section_type(canonical_title)
+
+            if stype == "section_8_1":
+                section.structured_data = Section81StructuredExtractor.extract(content)
+            elif stype == "section_8_4":
+                section.structured_data = Section84StructuredExtractor.extract(content)
+            elif stype == "section_9":
+                section.structured_data = Section9StructuredExtractor.extract(content)
+            elif stype == "section_8_3":
+                section.structured_data = Section83StructuredExtractor.extract(content)
+            elif stype == "section_6":
+                section.structured_data = Section6StructuredExtractor.extract(content)
+            elif stype == "section_12":
+                section.structured_data = Section12StructuredExtractor.extract(content)
+            elif stype == "section_5":
+                section.structured_data = Section5StructuredExtractor.extract(content)
+            elif stype == "section_4":
+                section.structured_data = Section4StructuredExtractor.extract(content)
+            elif stype == "section_1":
+                section.structured_data = Section1StructuredExtractor.extract(content)
+            elif stype == "section_2":
+                section.structured_data = Section2StructuredExtractor.extract(content)
+            elif stype == "section_3":
+                section.structured_data = Section3StructuredExtractor.extract(content)
+            elif stype == "section_11":
+                # Section 11: assemble content from tc_* slices and extract
+                sec11_content: List[Dict[str, Any]] = []
+                sec11_content.extend(content)
+                for tc_key in tc_keys:
+                    tc_slice = mapped_sections.get(tc_key, [])
+                    for b in tc_slice:
+                        btype = b.get("type", "")
+                        if btype == "paragraph":
+                            sec11_content.append({
+                                "type": "paragraph",
+                                "text": b.get("text", ""),
+                                "style": b.get("style", ""),
+                                "bold_formatting": b.get("bold_formatting"),
+                            })
+                        elif btype == "table":
+                            sec11_content.append({"type": "table", "rows": b.get("rows", [])})
+                        elif btype == "image":
+                            sec11_content.append({"type": "image", "image_path": b.get("path", "")})
+                    rendered_tc.add(tc_key)
+                section.structured_data = Section11StructuredExtractor.extract(sec11_content)
+                # Stamp each test case with actual SEC-11-N based on the tc_key
+                if section.structured_data and "test_cases" in section.structured_data:
+                    for tc_data, tc_key in zip(section.structured_data["test_cases"], tc_keys):
+                        tc_num = tc_key.split('_')[-1]
+                        tc_data["section_id"] = f"SEC-11-{tc_num}"
+                section.extracted = True
+            else:
+                # Generic: keep as content list
+                section.content = content
+
+            self.output.sections.append(section)
+
+        return self.output
+
+
+# -------------------------------------------------
+# MAIN ENTRY POINT
+# -------------------------------------------------
+def build_structured_document(lossless_json_path: Path) -> Dict[str, Any]:
+    with open(lossless_json_path, "r", encoding="utf-8") as f:
+        lossless_data = json.load(f)
+
+    document_name = lossless_data["document"]
+    raw_blocks = lossless_data["blocks"]
+
+    builder = StructuredSectionBuilder(document_name)
+    doc = builder.build(raw_blocks)
+    return doc.to_dict()
+
+
+def main():
+    if len(sys.argv) < 2:
+        print("Usage: python AI_structured_extract.py <lossless.json>")
+        sys.exit(1)
+
+    lossless_path = Path(sys.argv[1])
+    if not lossless_path.exists():
+        print(f"Error: File not found: {lossless_path}")
+        sys.exit(1)
+
+    structured_doc = build_structured_document(lossless_path)
+    out_path = lossless_path.parent / f"{lossless_path.stem.replace('_lossless', '')}ai_structured.json"
+
+    with open(out_path, "w", encoding="utf-8") as f:
+        json.dump(structured_doc, f, indent=2, ensure_ascii=False)
+
+    print(f"✅ AI STRUCTURED DOCUMENT CREATED: {out_path}")
+    print(f"📊 Total sections: {len(structured_doc.get('sections', []))}")
+
+
+if __name__ == "__main__":
+    main()
