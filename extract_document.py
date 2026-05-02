@@ -551,6 +551,62 @@ def main():
 
     phase1_sections = validator_result.get("phase1", {}).get("sections", {})
 
+    # ------------------------------------------------------------------
+    # section_0 — Front Page (blocks before the first H1)
+    # If section_1 (sec1) is FAIL/MISSING, the front page end-boundary
+    # is unknown, so section_0 also cascades to FAIL.
+    # ------------------------------------------------------------------
+    sec1_p1   = phase1_sections.get("sec1", {})
+    sec1_status = sec1_p1.get("status", "PASS")
+    sec1_failed = sec1_status in ("FAIL", "MISSING")
+
+    fp_detail    = validator_result.get("split_map_detail", {}).get("front_page") or {}
+    fp_range     = fp_detail.get("range", "N/A")
+
+    if sec1_failed:
+        section0_status   = "FAIL"
+        section0_errors   = [
+            {
+                "type":          "BOUNDARY_UNKNOWN",
+                "severity":      "HIGH",
+                "message":       (
+                    "Front Page end-boundary cannot be determined because "
+                    "Section 1 ('1. ITSAR Section No & Name') is missing. "
+                    "The Front Page content may be contaminated or incomplete."
+                ),
+                "suggestion":    "Add a Heading 1 titled '1. ITSAR Section No & Name' so the Front Page boundary can be reliably identified.",
+                "where":         "Front Page",
+                "redirect_text": "Front Page",
+                "what":          "Missing section boundary caused by absent Section 1 heading",
+            }
+        ]
+        section0_findings = "Issues found."
+    else:
+        section0_status   = "PASS"
+        section0_errors   = []
+        section0_findings = "No findings."
+
+    section0_obj = {
+        "section_id":   "section_0",
+        "section_name": "Front Page",
+        "checks": [
+            {
+                "check_name": "Heading",
+                "validation_results": [
+                    {
+                        "checklist_name": "Section Structure & Completeness",
+                        "status":         section0_status,
+                        "error_count":    len(section0_errors),
+                        "errors":         section0_errors,
+                        "findings":       section0_findings,
+                    }
+                ],
+            }
+        ],
+    }
+    structured_sections.append(section0_obj)
+    # ------------------------------------------------------------------
+
     for i, (sec_key, sec_name) in enumerate(_EXPECTED_SECTIONS):
         sec_info = sections_result.get(sec_key, {})
         issues = sec_info.get("issues", [])
@@ -730,7 +786,27 @@ def main():
         "sec8_3": "section_8_3",
         "sec8_4": "section_8_4",
     }
-    
+
+    # section_0 — Front Page skeleton (always first)
+    skeleton_sections.append({
+        "section_id":   "section_0",
+        "section_name": "Front Page",
+        "checks": [
+            {
+                "check_name": "",
+                "validation_results": [
+                    {
+                        "checklist_name": "",
+                        "status":         "",
+                        "error_count":    0,
+                        "errors":         [],
+                        "findings":       ""
+                    }
+                ]
+            }
+        ]
+    })
+
     for i, (sec_key, sec_name) in enumerate(_EXPECTED_SECTIONS):
         # Base skeleton for a section
         sec_skeleton = {
