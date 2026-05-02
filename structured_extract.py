@@ -868,7 +868,11 @@ class StructuredSectionBuilder:
     # ------------------------------------------------------------------
     # NEW: Map-driven build — validator owns structure, extractor owns content
     # ------------------------------------------------------------------
-    def build_from_map(self, mapped_sections: Dict[str, List[Dict[str, Any]]]) -> "DocumentJSON":
+    def build_from_map(
+        self,
+        mapped_sections: Dict[str, List[Dict[str, Any]]],
+        failed_keys: Optional[set] = None,
+    ) -> "DocumentJSON":
         """
         Build structured output directly from pre-sliced mapped_sections produced
         by document_split_validator.build_mapped_sections().
@@ -950,9 +954,21 @@ class StructuredSectionBuilder:
             key=lambda k: int(k.split("_")[1]),
         )
 
+        failed_keys = failed_keys or set()
+
         for key in ORDERED_KEYS:
             raw_slice = mapped_sections.get(key)
             if raw_slice is None:
+                # Emit a FAIL stub if this key was explicitly failed
+                if key in failed_keys and key in SEC_META:
+                    canonical_title, level = SEC_META[key]
+                    stub = Section(
+                        section_id=self._key_to_section_id(key),
+                        title=canonical_title,
+                        level=level,
+                    )
+                    stub.structured_data = {"status": "FAIL"}
+                    self.output.sections.append(stub)
                 continue
 
             canonical_title, level = SEC_META.get(key, (key, 1))

@@ -586,17 +586,10 @@ def main():
                     iss_copy["what"] = "Missing or invalid section formatting"
                 general_errors.append(iss_copy)
 
-        # If the section is completely missing, its block_range is "N/A"
-        is_missing = sec_info.get("block_range") == "N/A"
-        
         val_results = []
-        
-        if is_missing:
-            gen_status = "SKIPPED"
-            findings_text = "Not evaluated (section missing or incorrect heading level)."
-        else:
-            gen_status = "FAIL" if general_errors else "PASS"
-            findings_text = "Issues found." if general_errors else "No findings."
+
+        gen_status = "FAIL" if general_errors else "PASS"
+        findings_text = "Issues found." if general_errors else "No findings."
 
         val_results.append({
             "checklist_name": "Section Structure & Completeness",
@@ -641,14 +634,8 @@ def main():
 
             for sub_key, sub_name, sub_sec_id, sub_info in items_to_process:
                 sub_errs = sub_errors.get(sub_key, [])
-                sub_is_missing = sub_info.get("found") is None if "found" in sub_info else True
-
-                if is_missing or sub_is_missing:
-                    sub_status = "SKIPPED"
-                    sub_findings = "Not evaluated (subsection missing)."
-                else:
-                    sub_status = "FAIL" if sub_errs else "PASS"
-                    sub_findings = "Issues found." if sub_errs else "No findings."
+                sub_status = "FAIL" if sub_errs else "PASS"
+                sub_findings = "Issues found." if sub_errs else "No findings."
 
                 sub_val_results = [{
                     "checklist_name": "Section Structure & Completeness",
@@ -672,16 +659,9 @@ def main():
             # All other sections: subsections stay as checklist_name rows
             for sub_key, sub_info in h2_dict.items():
                 sub_name = sub_info.get("heading") or sub_info.get("expected") or sub_key
-                sub_errs = sub_errors[sub_key]
-
-                sub_is_missing = sub_info.get("found") is None if "found" in sub_info else False
-
-                if is_missing or sub_is_missing:
-                    sub_status = "SKIPPED"
-                    sub_findings = "Not evaluated (subsection missing)."
-                else:
-                    sub_status = "FAIL" if sub_errs else "PASS"
-                    sub_findings = "Issues found." if sub_errs else "No findings."
+                sub_errs = sub_errors.get(sub_key, [])
+                sub_status = "FAIL" if sub_errs else "PASS"
+                sub_findings = "Issues found." if sub_errs else "No findings."
 
                 val_results.append({
                     "checklist_name": sub_name,
@@ -902,10 +882,16 @@ def main():
 
     try:
         builder         = StructuredSectionBuilder(lossless_data["document"])
-        structured_data = builder.build_from_map(mapped_sections).to_dict()
+        structured_data = builder.build_from_map(mapped_sections, failed_keys=set(failed_keys)).to_dict()
     except Exception as exc:
         print(f"[ERROR] structured_extract (build_from_map) failed: {exc}")
         structured_data = {"document": lossless_data.get("document"), "sections": [], "error": str(exc)}
+
+    # If sec1 heading is missing, the front page end-boundary is unknown;
+    # its content may be contaminated — mark FAIL and strip the content entirely.
+    if "sec1" in failed_keys and structured_data.get("frontpage_data"):
+        structured_data["frontpage_data"]["status"] = "FAIL"
+        structured_data["frontpage_data"].pop("content", None)
 
     structured_path = output_dir / f"{base_name}_structured.json"
     with open(structured_path, "w", encoding="utf-8") as f:
@@ -921,17 +907,21 @@ def main():
     print(f"{'='*60}")
     try:
         ai_builder         = AIStructuredSectionBuilder(lossless_data["document"])
-        ai_structured_data = ai_builder.build_from_map(mapped_sections).to_dict()
+        ai_structured_data = ai_builder.build_from_map(mapped_sections, failed_keys=set(failed_keys)).to_dict()
     except Exception as exc:
         print(f"[ERROR] AI_structured_extract (build_from_map) failed: {exc}")
         ai_structured_data = {"document": lossless_data.get("document"), "sections": [], "error": str(exc)}
+
+    # Same frontpage boundary check for AI-structured output
+    if "sec1" in failed_keys and ai_structured_data.get("frontpage_data"):
+        ai_structured_data["frontpage_data"]["status"] = "FAIL"
+        ai_structured_data["frontpage_data"].pop("content", None)
 
     ai_structured_path = output_dir / f"{base_name}_ai_structured.json"
     with open(ai_structured_path, "w", encoding="utf-8") as f:
         json.dump(ai_structured_data, f, indent=2, ensure_ascii=False)
     print(f"  Saved: {ai_structured_path}")
     print(f"  Sections in output: {len(ai_structured_data.get('sections', []))}")
-
     # ==================================================================
     # FINAL SUMMARY
     # ==================================================================
