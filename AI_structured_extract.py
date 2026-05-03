@@ -1101,12 +1101,12 @@ class StructuredSectionBuilder:
         if _fp_validation["status"] == "PASS":
             self.frontpage.structured = FrontPageStructuredExtractor.extract(fp_blocks)
         else:
-            # Fallback: flat content list (preserves legacy behaviour on malformed docs)
-            for b in fp_blocks:
-                if b.get("type") == "paragraph":
-                    t = (b.get("text") or "").strip()
-                    if t:
-                        self.frontpage.content.append(t)
+            # One or more required Heading 2 fields are missing — emit a FAIL stub.
+            # The full error detail is surfaced in output.json (section_0).
+            self.frontpage.structured = {
+                "section_id": "FP-01",
+                "status":     "FAIL",
+            }
         self.frontpage_done = True
         self.output.frontpage_data = self.frontpage
 

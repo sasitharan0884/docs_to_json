@@ -9,7 +9,7 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from lossless_extract import parse_docx
-from structured_extract import StructuredSectionBuilder
+from structured_extract import StructuredSectionBuilder, validate_frontpage_headings
 from AI_structured_extract import StructuredSectionBuilder as AIStructuredSectionBuilder
 from document_split_validator import run_validator
 
@@ -563,28 +563,60 @@ def main():
     fp_detail    = validator_result.get("split_map_detail", {}).get("front_page") or {}
     fp_range     = fp_detail.get("range", "N/A")
 
+    # --- Front Page Heading 2 validation -----------------------------------
+    # Run independently of the sec1 boundary check so both error types can
+    # appear together in section_0 when both conditions are triggered.
+    # NOTE: the local `mapped_sections` is built later; read from
+    # validator_result directly to avoid a forward-reference error.
+    _fp_raw_blocks = (validator_result.get("mapped_sections") or {}).get("front_page", [])
+    _fp_h2_result  = validate_frontpage_headings(_fp_raw_blocks)
+    _fp_h2_failed  = _fp_h2_result["status"] == "FAIL"
+
+    section0_errors: list = []
+
     if sec1_failed:
-        section0_status   = "FAIL"
-        section0_errors   = [
-            {
-                "type":          "BOUNDARY_UNKNOWN",
-                "severity":      "HIGH",
-                "message":       (
-                    "Front Page end-boundary cannot be determined because "
-                    "Section 1 ('1. ITSAR Section No & Name') is missing. "
-                    "The Front Page content may be contaminated or incomplete."
-                ),
-                "suggestion":    "Add a Heading 1 titled '1. ITSAR Section No & Name' so the Front Page boundary can be reliably identified.",
-                "where":         "Front Page",
-                "redirect_text": "Front Page",
-                "what":          "Missing section boundary caused by absent Section 1 heading",
-            }
-        ]
-        section0_findings = "Issues found."
-    else:
-        section0_status   = "PASS"
-        section0_errors   = []
-        section0_findings = "No findings."
+        section0_errors.append({
+            "type":          "BOUNDARY_UNKNOWN",
+            "severity":      "HIGH",
+            "message":       (
+                "Front Page end-boundary cannot be determined because "
+                "Section 1 ('1. ITSAR Section No & Name') is missing. "
+                "The Front Page content may be contaminated or incomplete."
+            ),
+            "suggestion":    "Add a Heading 1 titled '1. ITSAR Section No & Name' so the Front Page boundary can be reliably identified.",
+            "where":         "Front Page",
+            "redirect_text": "Front Page",
+            "what":          "Missing section boundary caused by absent Section 1 heading",
+        })
+
+    if _fp_h2_failed:
+        missing_labels = _fp_h2_result.get("missing", [])
+        section0_errors.append({
+            "type":          "MISSING_FRONTPAGE_HEADINGS",
+            "severity":      "HIGH",
+            "message":       (
+                f"Front Page is missing {len(missing_labels)} required Heading 2 "
+                f"field(s): {', '.join(missing_labels)}. "
+                "All 7 DUT metadata fields must be present as Heading 2 paragraphs "
+                "in the correct order."
+            ),
+            "suggestion":    (
+                "Ensure the following Heading 2 labels are present in the Front Page in order: "
+                + ", ".join([
+                    "DUT Details:", "DUT Software Version:", "Digest Hash of OS:",
+                    "Digest Hash of Configuration:", "Applicable ITSAR:",
+                    "ITSAR Version No:", "OEM Supplied Document list:",
+                ])
+            ),
+            "where":         "Front Page",
+            "redirect_text": "Front Page",
+            "what":          f"Missing required Heading 2 field(s): {', '.join(missing_labels)}",
+            "missing_fields": missing_labels,
+            "found_order":    _fp_h2_result.get("found_order", []),
+        })
+
+    section0_status   = "FAIL" if section0_errors else "PASS"
+    section0_findings = "Issues found." if section0_errors else "No findings."
 
     section0_obj = {
         "section_id":   "section_0",
@@ -966,8 +998,11 @@ def main():
     # If sec1 heading is missing, the front page end-boundary is unknown;
     # its content may be contaminated — mark FAIL and strip the content entirely.
     if "sec1" in failed_keys and structured_data.get("frontpage_data"):
-        structured_data["frontpage_data"]["status"] = "FAIL"
-        structured_data["frontpage_data"].pop("content", None)
+        structured_data["frontpage_data"] = {
+            "section_id": "FP-01",
+            "status": "FAIL",
+            "error": "Front Page end-boundary unknown — Section 1 heading is missing.",
+        }
 
     structured_path = output_dir / f"{base_name}_structured.json"
     with open(structured_path, "w", encoding="utf-8") as f:
@@ -990,8 +1025,11 @@ def main():
 
     # Same frontpage boundary check for AI-structured output
     if "sec1" in failed_keys and ai_structured_data.get("frontpage_data"):
-        ai_structured_data["frontpage_data"]["status"] = "FAIL"
-        ai_structured_data["frontpage_data"].pop("content", None)
+        ai_structured_data["frontpage_data"] = {
+            "section_id": "FP-01",
+            "status": "FAIL",
+            "error": "Front Page end-boundary unknown — Section 1 heading is missing.",
+        }
 
     ai_structured_path = output_dir / f"{base_name}_ai_structured.json"
     with open(ai_structured_path, "w", encoding="utf-8") as f:
