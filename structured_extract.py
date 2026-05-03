@@ -118,12 +118,162 @@ def strip_leading_bullet_symbol(text: str) -> str:
 # Data structures
 # -------------------------
 
+# -------------------------
+# Front-page Heading-2 field map (order matters for validation)
+# -------------------------
+_FP_H2_FIELDS = [
+    "DUT Details:",
+    "DUT Software Version:",
+    "Digest Hash of OS:",
+    "Digest Hash of Configuration:",
+    "Applicable ITSAR:",
+    "ITSAR Version No:",
+    "OEM Supplied Document list:",
+]
+
+_FP_H2_KEYS = {
+    "DUT Details:":                  "dut_details",
+    "DUT Software Version:":         "dut_software_version",
+    "Digest Hash of OS:":            "digest_hash_of_os",
+    "Digest Hash of Configuration:": "digest_hash_of_configuration",
+    "Applicable ITSAR:":             "applicable_itsar",
+    "ITSAR Version No:":             "itsar_version_no",
+    "OEM Supplied Document list:":   "oem_supplied_document_list",
+}
+
+
+def _fp_h2_normalize(text: str) -> str:
+    """Normalize a Heading 2 label for fuzzy matching against _FP_H2_FIELDS."""
+    t = (text or "").strip().rstrip()
+    # Strip trailing whitespace variations and collapse inner spaces
+    t = re.sub(r'\s+', ' ', t).strip()
+    return t
+
+
+def validate_frontpage_headings(fp_blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Validate that all required Heading 2 fields are present in the front-page
+    blocks and are in the correct order.
+
+    Returns a dict with:
+        {
+            "status": "PASS" | "FAIL",
+            "found_order": [list of matched canonical labels in document order],
+            "missing": [list of canonical labels absent from front page],
+            "out_of_order": [list of canonical labels found in wrong order],
+        }
+    """
+    found_labels: List[str] = []
+    for b in fp_blocks:
+        if b.get("type") != "paragraph" or b.get("style") != "Heading 2":
+            continue
+        raw = _fp_h2_normalize(b.get("text", ""))
+        for canonical in _FP_H2_FIELDS:
+            if _fp_h2_normalize(canonical) == raw or raw.startswith(_fp_h2_normalize(canonical).rstrip(':')):
+                found_labels.append(canonical)
+                break
+
+    missing = [f for f in _FP_H2_FIELDS if f not in found_labels]
+
+    # Check order: the subsequence of _FP_H2_FIELDS that was found must be in
+    # the same relative order as _FP_H2_FIELDS.
+    out_of_order: List[str] = []
+    expected_order = [f for f in _FP_H2_FIELDS if f in found_labels]
+    if found_labels != expected_order:
+        out_of_order = [
+            f for f in found_labels if f not in expected_order[
+                : found_labels.index(f) + 1 if f in expected_order else len(expected_order)
+            ]
+        ]
+
+    status = "PASS" if not missing and not out_of_order else "FAIL"
+    return {
+        "status": status,
+        "found_order": found_labels,
+        "missing": missing,
+        "out_of_order": out_of_order,
+    }
+
+
+class FrontPageStructuredExtractor:
+    """
+    Parses the raw front-page block slice into a typed structured dict.
+
+    Schema produced (replaces the legacy flat-list schema):
+    {
+      "section_id": "FP-01",
+      "content": ["TEST REPORT FOR: ..."],          # title line only
+      "dut_details": {
+        "title": "DUT Details:",
+        "content": [" Product: JIDU6201", " Model: JIDU6201"]
+      },
+      "dut_software_version": {"title": "DUT Software Version:", "content": ["..."]},
+      "digest_hash_of_os":    {"title": "Digest Hash of OS:",    "content": ["..."]},
+      "digest_hash_of_configuration": {"title": "Digest Hash of Configuration:", "content": ["..."]},
+      "applicable_itsar":     {"title": "Applicable ITSAR:",     "content": ["..."]},
+      "itsar_version_no":     {"title": "ITSAR Version No:",     "content": ["..."]},
+      "oem_supplied_document_list": {"title": "OEM Supplied Document list:", "content": ["..."]},
+    }
+    """
+
+    @staticmethod
+    def extract(fp_blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
+        result: Dict[str, Any] = {
+            "section_id": "FP-01",
+            "content": [],
+        }
+        # Initialise all expected field slots
+        for canonical, key in _FP_H2_KEYS.items():
+            result[key] = {"title": canonical, "content": []}
+
+        current_key: Optional[str] = None
+
+        for b in fp_blocks:
+            btype = b.get("type", "")
+            style = b.get("style", "")
+            text  = (b.get("text") or "").strip()
+
+            if btype != "paragraph":
+                continue
+
+            if style == "Heading 2":
+                raw_norm = _fp_h2_normalize(text)
+                matched = None
+                for canonical in _FP_H2_FIELDS:
+                    if _fp_h2_normalize(canonical) == raw_norm or raw_norm.startswith(
+                        _fp_h2_normalize(canonical).rstrip(':')
+                    ):
+                        matched = canonical
+                        break
+                if matched:
+                    current_key = _FP_H2_KEYS[matched]
+                    # Update the title to exactly what's in the document
+                    result[current_key]["title"] = text
+                else:
+                    current_key = None
+                continue
+
+            # Non-Heading-2 paragraph
+            if current_key is None:
+                # Belongs to the overall title/preamble
+                if text:
+                    result["content"].append(text)
+            else:
+                if text:
+                    result[current_key]["content"].append(text)
+
+        return result
+
+
 @dataclass
 class FrontPage:
     section_id: str = "FP-01"
     content: List[str] = field(default_factory=list)
+    structured: Optional[Dict[str, Any]] = None
 
     def to_dict(self) -> Dict[str, Any]:
+        if self.structured is not None:
+            return self.structured
         return {"section_id": self.section_id, "content": self.content}
 
 @dataclass
@@ -932,13 +1082,18 @@ class StructuredSectionBuilder:
                     content.append({"type": "image", "image_path": b.get("path", "")})
             return content
 
-        # Front-page
+        # Front-page — validate Heading 2 order, then build structured output
         fp_blocks = mapped_sections.get("front_page", [])
-        for b in fp_blocks:
-            if b.get("type") == "paragraph":
-                t = (b.get("text") or "").strip()
-                if t:
-                    self.frontpage.content.append(t)
+        _fp_validation = validate_frontpage_headings(fp_blocks)
+        if _fp_validation["status"] == "PASS":
+            self.frontpage.structured = FrontPageStructuredExtractor.extract(fp_blocks)
+        else:
+            # Fallback: flat content list (preserves legacy behaviour on malformed docs)
+            for b in fp_blocks:
+                if b.get("type") == "paragraph":
+                    t = (b.get("text") or "").strip()
+                    if t:
+                        self.frontpage.content.append(t)
         self.frontpage_done = True
         self.output.frontpage_data = self.frontpage
 
