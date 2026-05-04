@@ -1042,6 +1042,7 @@ class StructuredSectionBuilder:
         self,
         mapped_sections: Dict[str, List[Dict[str, Any]]],
         failed_keys: Optional[set] = None,
+        failed_tc_headings: Optional[Dict[str, str]] = None,
     ) -> "DocumentJSON":
         """
         Build structured output directly from pre-sliced mapped_sections produced
@@ -1182,10 +1183,20 @@ class StructuredSectionBuilder:
             elif stype == "section_3":
                 section.structured_data = Section3StructuredExtractor.extract(content)
             elif stype == "section_11":
-                # Section 11: assemble content from tc_* slices and extract
+                # Section 11: assemble content only from tc_* slices that PASSED.
+                # failed tc_* keys were removed from mapped_sections by extract_document.py.
+                _failed_tc_hdgs = failed_tc_headings or {}
+
+                # Full ordered key list: passing (from mapped_sections) + failing, sorted by number.
+                _all_tc_keys = sorted(
+                    list(tc_keys) + list(_failed_tc_hdgs.keys()),
+                    key=lambda k: int(k.split("_")[1]) if k.split("_")[1].isdigit() else 99999,
+                )
+
+                # Collect content blocks only from passing TCs for the extractor.
                 sec11_content: List[Dict[str, Any]] = []
                 sec11_content.extend(content)
-                for tc_key in tc_keys:
+                for tc_key in tc_keys:                  # tc_keys = only passing keys
                     tc_slice = mapped_sections.get(tc_key, [])
                     for b in tc_slice:
                         btype = b.get("type", "")
@@ -1201,12 +1212,45 @@ class StructuredSectionBuilder:
                         elif btype == "image":
                             sec11_content.append({"type": "image", "image_path": b.get("path", "")})
                     rendered_tc.add(tc_key)
-                section.structured_data = Section11StructuredExtractor.extract(sec11_content)
-                # Stamp each test case with actual SEC-11-N based on the tc_key
-                if section.structured_data and "test_cases" in section.structured_data:
-                    for tc_data, tc_key in zip(section.structured_data["test_cases"], tc_keys):
-                        tc_num = tc_key.split('_')[-1]
-                        tc_data["section_id"] = f"SEC-11-{tc_num}"
+
+                raw_extracted = Section11StructuredExtractor.extract(sec11_content)
+
+                # Stamp passing TCs with their SEC-11-N ids (positional, so order matters).
+                passing_tc_list = raw_extracted.get("test_cases", [])
+                for tc_data, tc_key in zip(passing_tc_list, tc_keys):
+                    tc_num = tc_key.split("_")[-1]
+                    tc_data["section_id"] = f"SEC-11-{tc_num}"
+
+                # Build a fast lookup: section_id -> tc_data (for PASS TCs)
+                _pass_by_sid: Dict[str, Any] = {
+                    td["section_id"]: td for td in passing_tc_list if "section_id" in td
+                }
+
+                # Assemble the final ordered list: tc_1, tc_2, tc_3 ... interleaved.
+                ordered_test_cases: List[Dict[str, Any]] = []
+                for tc_key in _all_tc_keys:
+                    tc_num = tc_key.split("_")[-1]
+                    sid = f"SEC-11-{tc_num}"
+                    if tc_key in tc_keys:
+                        # PASS: use the extracted data (already stamped with section_id)
+                        tc_data = _pass_by_sid.get(sid)
+                        if tc_data:
+                            ordered_test_cases.append(tc_data)
+                    else:
+                        # FAIL: emit a minimal stub.
+                        # Title = exact H2 text from the document.
+                        actual_heading = _failed_tc_hdgs.get(tc_key, tc_key)
+                        ordered_test_cases.append({
+                            "section_id": sid,
+                            "test_case_heading": actual_heading,
+                            "test_case_id": "",
+                            "status": "FAIL",
+                        })
+
+                section.structured_data = {
+                    "test_cases": ordered_test_cases,
+                    "total_test_cases": len(ordered_test_cases),
+                }
                 section.extracted = True
             else:
                 # Generic: keep as content list

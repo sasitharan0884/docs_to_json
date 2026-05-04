@@ -196,9 +196,9 @@ def _get_failed_section_keys(validator_result: Dict[str, Any]) -> List[str]:
                 failed.append(sub_key)
                 
     # 2. Test Cases from Phase 1 — individual tc_* keys.
-    #    For the structured (old flat) format, only HIGH severity issues block a tc_*.
-    #    MEDIUM issues like MISSING_H3 only matter for the AI-structured format; the
-    #    flat content: [...] format does not require H3 subsection structure.
+    #    A TC is blocked if ANY H3 has status == "FAIL" (missing OR unstyled).
+    #    This enforces the Initial Check: a TC is only created when it fully
+    #    passes — all 5 H3 subsections must be present AND correctly styled.
     phase1 = validator_result.get("phase1") or {}
     p1_sections = phase1.get("sections") or {}
     sec11_info = p1_sections.get("sec11") or {}
@@ -206,25 +206,28 @@ def _get_failed_section_keys(validator_result: Dict[str, Any]) -> List[str]:
 
     failed_tc_keys: List[str] = []
     for tc_key, tc_info in h2_test_cases.items():
-        # Only block extraction if there is a HIGH severity issue.
-        # INVALID_H3_STYLE (H3 present but wrong style) is MEDIUM — does NOT block extraction.
-        # Only a completely absent H3 ("found" is None) warrants blocking.
         h3_children = tc_info.get("h3_children", {})
         has_high_issue = False
 
-        # Bug fix: h2_test_cases entries store the heading under "found", not "heading".
-        # "heading" key does not exist → always None → was incorrectly failing every TC.
+        # Fail the TC if its overall Phase-1 status is already FAIL.
+        # This covers: unstyled H2 heading, orphan TC, empty TC, etc.
+        if tc_info.get("status") == "FAIL":
+            has_high_issue = True
+
+        # Fail the TC if the H2 heading itself was not found.
         if tc_info.get("found") is None and not tc_info.get("orphan", False):
             has_high_issue = True
 
-        # Only block if an H3 is completely absent (found is None), not just unstyled.
-        has_absent_h3 = any(
-            v.get("status") == "FAIL" and v.get("found") is None
+        # Block extraction if ANY H3 has status == "FAIL".
+        # This covers both completely absent H3s (found is None) AND
+        # H3s that were present but lacked the correct Heading 3 style.
+        has_failing_h3 = any(
+            v.get("status") == "FAIL"
             for v in h3_children.values()
         )
-        if has_absent_h3:
+        if has_failing_h3:
             has_high_issue = True
-            
+
         if has_high_issue:
             failed_tc_keys.append(tc_key)
 
@@ -988,9 +991,23 @@ def main():
             if k.startswith("tc_"):
                 mapped_sections.pop(k, None)
 
+    # Build a heading-text lookup for every failed tc_* key so the FAIL stubs
+    # in the structured / ai_structured JSONs can show the real document title
+    # (e.g. "11.1.7 Test Case Number:") instead of a generic placeholder.
+    _split_map_detail = validator_result.get("split_map_detail") or {}
+    failed_tc_headings: Dict[str, str] = {
+        fk: (_split_map_detail.get(fk) or {}).get("heading") or fk
+        for fk in failed_keys
+        if fk.startswith("tc_")
+    }
+
     try:
         builder         = StructuredSectionBuilder(lossless_data["document"])
-        structured_data = builder.build_from_map(mapped_sections, failed_keys=set(failed_keys)).to_dict()
+        structured_data = builder.build_from_map(
+            mapped_sections,
+            failed_keys=set(failed_keys),
+            failed_tc_headings=failed_tc_headings,
+        ).to_dict()
     except Exception as exc:
         print(f"[ERROR] structured_extract (build_from_map) failed: {exc}")
         structured_data = {"document": lossless_data.get("document"), "sections": [], "error": str(exc)}
@@ -1018,7 +1035,11 @@ def main():
     print(f"{'='*60}")
     try:
         ai_builder         = AIStructuredSectionBuilder(lossless_data["document"])
-        ai_structured_data = ai_builder.build_from_map(mapped_sections, failed_keys=set(failed_keys)).to_dict()
+        ai_structured_data = ai_builder.build_from_map(
+            mapped_sections,
+            failed_keys=set(failed_keys),
+            failed_tc_headings=failed_tc_headings,
+        ).to_dict()
     except Exception as exc:
         print(f"[ERROR] AI_structured_extract (build_from_map) failed: {exc}")
         ai_structured_data = {"document": lossless_data.get("document"), "sections": [], "error": str(exc)}

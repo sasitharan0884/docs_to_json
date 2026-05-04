@@ -646,6 +646,90 @@ class Section12StructuredExtractor:
 # Builder
 # -------------------------
 
+
+# ─────────────────────────────────────────────────────────────────────────────
+# Section-11 subsection splitter (for _structured.json only)
+# Splits a tc_* raw-block slice into labeled subsection groups.
+# ─────────────────────────────────────────────────────────────────────────────
+
+_H3_SLOT_RE = [
+    ("test_case_name",        re.compile(r"^a[\s\.\)]", re.I)),
+    ("test_case_description", re.compile(r"^b[\s\.\)]", re.I)),
+    ("execution_steps",       re.compile(r"^c[\s\.\)]", re.I)),
+    ("test_observations",     re.compile(r"^d[\s\.\)]", re.I)),
+    ("evidence_provided",     re.compile(r"^e[\s\.\)]", re.I)),
+]
+
+
+def _split_tc_by_subsection(tc_slice: list) -> dict:
+    """
+    Given a raw tc_* block slice (index 0 = H2 heading block),
+    return a dict with these keys (all values are lists of content items):
+
+        test_case_id, test_case_name, test_case_description,
+        execution_steps, test_observations, evidence_provided
+
+    H3 heading paragraphs are included as the FIRST item of each group
+    (preserving the exact label text, e.g. "a. Test Case Name: ").
+    Content before the first H3 goes into test_case_id.
+    """
+    result = {
+        "test_case_id":          [],
+        "test_case_name":        [],
+        "test_case_description": [],
+        "execution_steps":       [],
+        "test_observations":     [],
+        "evidence_provided":     [],
+    }
+    current_key = "test_case_id"
+
+    for b in tc_slice[1:]:          # skip the H2 heading block at index 0
+        btype = b.get("type", "")
+        style = b.get("style", "")
+        text  = (b.get("text") or "").strip()
+
+        if btype == "paragraph" and style == "Heading 3":
+            # Match against the a-e slot patterns
+            matched = None
+            for slot_key, pat in _H3_SLOT_RE:
+                if pat.match(text):
+                    matched = slot_key
+                    break
+            if matched:
+                current_key = matched
+                # Include the heading text as the first item of this group
+                result[current_key].append({"type": "paragraph", "text": text})
+            # Unrecognised H3: ignore (don't change current_key)
+            continue
+
+        # Regular content blocks
+        if btype == "paragraph":
+            full_text = b.get("text", "")
+            num_data  = b.get("numbering") or {}
+            prefix    = num_data.get("rendered_prefix")
+            if prefix and full_text and not full_text.startswith(prefix):
+                full_text = f"{prefix} {full_text}"
+            if full_text.strip():
+                result[current_key].append({"type": "paragraph", "text": full_text})
+
+        elif btype == "table":
+            rows = b.get("rows", [])
+            if rows and len(rows) >= 2:
+                result[current_key].append({
+                    "type":    "table",
+                    "headers": [str(c).strip() for c in rows[0]],
+                    "rows":    [[str(c).strip() for c in r] for r in rows[1:]],
+                })
+            elif rows:
+                result[current_key].append({"type": "table", "rows": rows})
+
+        elif btype == "image":
+            img_path = b.get("path", "")
+            if img_path:
+                result[current_key].append({"type": "image", "image_path": img_path})
+
+    return result
+
 class StructuredSectionBuilder:
     """
     Builds sections in a single pass with robust heading detection.
@@ -1022,6 +1106,7 @@ class StructuredSectionBuilder:
         self,
         mapped_sections: Dict[str, List[Dict[str, Any]]],
         failed_keys: Optional[set] = None,
+        failed_tc_headings: Optional[Dict[str, str]] = None,
     ) -> "DocumentJSON":
         """
         Build structured output directly from pre-sliced mapped_sections produced
@@ -1165,52 +1250,49 @@ class StructuredSectionBuilder:
                 sec.content = content  # preamble paragraphs (usually empty)
                 self.output.sections.append(sec)
 
-                # Each tc_* slice → flat subsection with old-style content list
-                for tc_key in tc_keys:
-                    tc_slice = mapped_sections.get(tc_key, [])
-                    if not tc_slice:
-                        continue
-                        
-                    tc_num = tc_key.split('_')[-1]
+                # Build the full ordered tc_* list: merge passing keys (from mapped_sections)
+                # and failing keys (from failed_tc_headings) sorted by their numeric suffix,
+                # so output appears as tc_1, tc_2, tc_3... regardless of PASS/FAIL.
+                _failed_tc_hdgs = failed_tc_headings or {}
+                _all_tc_keys = sorted(
+                    list(tc_keys) + [k for k in _failed_tc_hdgs],
+                    key=lambda k: int(k.split("_")[1]) if k.split("_")[1].isdigit() else 99999,
+                )
 
-                    # The first block of each tc_* slice is the heading (e.g. "11.1.1 Test Case Number:")
-                    heading_block = tc_slice[0]
-                    tc_title = (heading_block.get("text") or "").strip()
+                for tc_key in _all_tc_keys:
+                    tc_num = tc_key.split("_")[-1]
 
-                    tc_sec = Section(
-                        section_id=f"SEC-11-{tc_num}",
-                        title=tc_title,
-                        level=3,
-                    )
+                    if tc_key in tc_keys:
+                        # PASS TC: split content into labeled subsection groups.
+                        tc_slice = mapped_sections.get(tc_key, [])
+                        if not tc_slice:
+                            continue
 
-                    tc_content: List[Dict[str, Any]] = []
-                    for b in tc_slice[1:]:
-                        btype = b.get("type", "")
-                        if btype == "paragraph":
-                            full_text = b.get("text", "")
-                            num_data = b.get("numbering", {})
-                            prefix = (num_data or {}).get("rendered_prefix")
-                            if prefix and full_text and not full_text.startswith(prefix):
-                                full_text = f"{prefix} {full_text}"
-                            if full_text.strip():
-                                tc_content.append({"type": "paragraph", "text": full_text})
-                        elif btype == "table":
-                            rows = b.get("rows", [])
-                            if rows and len(rows) >= 2:
-                                tc_content.append({
-                                    "type": "table",
-                                    "headers": [str(c).strip() for c in rows[0]],
-                                    "rows": [[str(c).strip() for c in r] for r in rows[1:]],
-                                })
-                            elif rows:
-                                tc_content.append({"type": "table", "rows": rows})
-                        elif btype == "image":
-                            img_path = b.get("path", "")
-                            if img_path:
-                                tc_content.append({"type": "image", "image_path": img_path})
+                        tc_title = (tc_slice[0].get("text") or "").strip()
 
-                    tc_sec.content = tc_content
-                    self.output.sections.append(tc_sec)
+                        tc_sec = Section(
+                            section_id="SEC-11-" + tc_num,
+                            title=tc_title,
+                            level=3,
+                        )
+
+                        # Organise content by H3 subsection labels
+                        # (test_case_id, test_case_name, test_case_description,
+                        #  execution_steps, test_observations, evidence_provided)
+                        tc_sec.structured_data = _split_tc_by_subsection(tc_slice)
+                        self.output.sections.append(tc_sec)
+
+                    else:
+                        # FAIL TC: emit a minimal stub.
+                        # Title = exact H2 text from the document (e.g. "11.1.7 Test Case Number:")
+                        actual_heading = _failed_tc_hdgs.get(tc_key, tc_key)
+                        fail_stub = Section(
+                            section_id="SEC-11-" + tc_num,
+                            title=actual_heading,
+                            level=3,
+                        )
+                        fail_stub.structured_data = {"status": "FAIL"}
+                        self.output.sections.append(fail_stub)
 
                 # Skip the generic append at the bottom of the loop since we already appended
                 continue
