@@ -502,9 +502,14 @@ class StructuralExtractor:
 
     def _extract_bold_text(self, para: Paragraph):
         """
-        Extract ONLY explicitly bold run text.
-        This avoids incorrectly marking entire paragraphs as bold
-        when Word styles (e.g., List Paragraph) cause inherited bold.
+        Extract bold run text — covers three sources of bold:
+          1. Explicit run-level bold (run.bold is True)
+          2. Explicit font-level bold (run.font.bold is True)
+          3. Character style that implies bold (e.g., Word's built-in "Strong" style)
+
+        Note: Paragraphs like "Test Scenario 1.1.7.4: <body>" use the "Strong"
+        character style for the "Test Scenario " prefix and explicit bold for
+        the numeric ID suffix. Without case 3, only the numeric ID is captured.
         """
         bold_chunks = []
 
@@ -512,13 +517,22 @@ class StructuralExtractor:
             if not run.text:
                 continue
 
-            # Explicit run-level bold
+            # Case 1: Explicit run-level bold
             if run.bold is True:
                 bold_chunks.append(run.text)
                 continue
 
-            # Optional: sometimes python-docx exposes bold via run.font.bold
+            # Case 2: Font-level explicit bold
             if run.bold is None and getattr(run.font, "bold", None) is True:
+                bold_chunks.append(run.text)
+                continue
+
+            # Case 3: Character style that inherits bold (e.g. "Strong", "Bold")
+            run_style_name = (run.style.name if run.style is not None else "") or ""
+            if run_style_name and any(
+                kw in run_style_name
+                for kw in ("Strong", "Bold", "strong", "bold")
+            ):
                 bold_chunks.append(run.text)
 
         if not bold_chunks:
