@@ -110,9 +110,9 @@ _FP_H2_KEYS = {
 
 
 def _fp_h2_normalize(text: str) -> str:
-    """Normalize a Heading 2 label for fuzzy matching against _FP_H2_FIELDS."""
-    t = re.sub(r'\s+', ' ', (text or "").strip())
-    return t
+    """Normalize a Heading 2 label to lowercase alphanumeric only (e.g. 'digesthashofos')."""
+    t = (text or "").lower()
+    return re.sub(r'[^a-z0-9]+', '', t)
 
 
 def validate_frontpage_headings(fp_blocks: List[Dict[str, Any]]) -> Dict[str, Any]:
@@ -134,9 +134,8 @@ def validate_frontpage_headings(fp_blocks: List[Dict[str, Any]]) -> Dict[str, An
             continue
         raw = _fp_h2_normalize(b.get("text", ""))
         for canonical in _FP_H2_FIELDS:
-            if _fp_h2_normalize(canonical) == raw or raw.startswith(
-                _fp_h2_normalize(canonical).rstrip(':')
-            ):
+            norm_can = _fp_h2_normalize(canonical)
+            if norm_can == raw or raw.startswith(norm_can):
                 found_labels.append(canonical)
                 break
 
@@ -198,9 +197,8 @@ class FrontPageStructuredExtractor:
                 raw_norm = _fp_h2_normalize(text)
                 matched = None
                 for canonical in _FP_H2_FIELDS:
-                    if _fp_h2_normalize(canonical) == raw_norm or raw_norm.startswith(
-                        _fp_h2_normalize(canonical).rstrip(':')
-                    ):
+                    norm_can = _fp_h2_normalize(canonical)
+                    if norm_can == raw_norm or raw_norm.startswith(norm_can):
                         matched = canonical
                         break
                 if matched:

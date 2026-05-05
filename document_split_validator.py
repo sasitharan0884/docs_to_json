@@ -765,33 +765,6 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
                 heading_tree["h2_test_cases"] = tc_tree
                 heading_tree["total_test_cases"] = len(tc_keys)
 
-        # 5. Scenario consistency check (sec8_1 / sec8_4 / sec9)
-        #    Also collect scenario names for display
-        if key in ("sec8_1", "sec8_4", "sec9"):
-            sec_slice = split_map.slice(key)
-            scenarios = []
-            for b in sec_slice:
-                if b.get("type") == "paragraph":
-                    text = (b.get("text") or "").strip()
-                    bold = (b.get("bold_formatting") or "").strip()
-                    if bold and SCENARIO_HEADER_RE.match(text):
-                        scenarios.append(bold or text)
-            heading_tree["test_scenarios"] = scenarios
-
-        if key == "sec9":
-            counts = _count_scenario_headers_per_section(blocks, split_map)
-            if counts and not (
-                counts["sec8_1"] == counts["sec8_4"] == counts["sec9"]
-            ):
-                issues.append(_make_issue(
-                    "SCENARIO_COUNT_MISMATCH", "HIGH",
-                    f"Test Scenario count mismatch: "
-                    f"sec8.1={counts['sec8_1']}, "
-                    f"sec8.4={counts['sec8_4']}, "
-                    f"sec9={counts['sec9']}.",
-                    "Ensure the same set of Test Scenario headers (bold) appear in "
-                    "sections 8.1, 8.4, and 9.",
-                ))
 
         # 6. Section 12 Header Validation
         if key == "sec12":
@@ -894,24 +867,6 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
     }
 
 
-def _count_scenario_headers_per_section(
-    blocks: List[Dict], split_map: SplitMap
-) -> Optional[Dict[str, int]]:
-    """Count bold scenario headers in sec8_1, sec8_4, and sec9."""
-    result: Dict[str, int] = {}
-    for section_key in ("sec8_1", "sec8_4", "sec9"):
-        info = split_map.map.get(section_key)
-        if not info:
-            return None  # can't check if split map incomplete
-        count = sum(
-            1
-            for b in split_map.slice(section_key)
-            if b.get("type") == "paragraph"
-            and (b.get("bold_formatting") or "").strip()
-            and SCENARIO_HEADER_RE.match((b.get("text") or "").strip())
-        )
-        result[section_key] = count
-    return result
 
 
 # ---------------------------------------------------------------------------
