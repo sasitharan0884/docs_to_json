@@ -524,9 +524,77 @@ class Section9StructuredExtractor:
     Section 9:
     - New expected-result entry when bold_formatting exists (token-only bold)
     - Remaining text (after removing bold token) belongs to expected_result
+
+    Guards:
+    - If any Heading 2 or Heading 3 paragraph is present in section_content
+      the section boundary is contaminated — returns an error stub and no results.
+
+    Scenario ID matching (broader than module-level SCENARIO_HEADER_RE):
+    - "Test Scenario 1.1.11"  (two-segment dotted suffix)
+    - "Test Scenario:"        (bare label at start of text)
     """
-    @staticmethod
-    def extract(section_content: List[Dict]) -> Dict[str, Any]:
+
+    # Matches "Test Scenario" or "Test Case" followed by a dotted number with
+    # at least ONE dot (e.g. 1.1, 1.1.7, 1.1.11) — more permissive than the
+    # module-level SCENARIO_HEADER_RE which requires {2,} dot groups.
+    _SCENARIO_ID_RE = re.compile(
+        r"^\s*test\s*(?:scenario|case)s?\s+\d+(?:\.\d+){1,}\b",
+        re.IGNORECASE,
+    )
+
+    # Matches a bare "Test Scenario:" / "Test Case:" label with no number.
+    _SCENARIO_BARE_RE = re.compile(
+        r"^\s*test\s*(?:scenario|case)s?\s*:\s*",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_scenario_header(cls, text: str, bold: str) -> bool:
+        """Return True if this paragraph opens a new expected-result entry."""
+        # Standard: text starts with a dotted test-scenario ID and is bold
+        if bold and cls._SCENARIO_ID_RE.match(text):
+            return True
+        # Bare label "Test Scenario: ..." — bold required to avoid false positives
+        if bold and cls._SCENARIO_BARE_RE.match(text):
+            return True
+        return False
+
+    @classmethod
+    def extract(cls, section_content: List[Dict]) -> Dict[str, Any]:
+        # ---------------------------------------------------------------
+        # Guard: Heading 2 / Heading 3 present → boundary contamination
+        # ---------------------------------------------------------------
+        heading_issues = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            style = (item.get("style") or "").strip()
+            if style in ("Heading 2", "Heading 3"):
+                heading_issues.append({
+                    "type": "UNEXPECTED_HEADING",
+                    "severity": "HIGH",
+                    "style": style,
+                    "text": (item.get("text") or "").strip(),
+                    "message": (
+                        f"A '{style}' paragraph was found inside Section 9 "
+                        "(Expected Results for Pass). This indicates a boundary "
+                        "issue — test-case sub-headings should not appear here."
+                    ),
+                })
+
+        if heading_issues:
+            return {
+                "status": "FAIL",
+                "error": "Section 9 contains unexpected Heading 2 / Heading 3 paragraphs. "
+                         "Expected-result extraction was skipped to avoid contaminated output.",
+                "heading_issues": heading_issues,
+                "expected_results": [],
+                "total_expected_results": 0,
+            }
+
+        # ---------------------------------------------------------------
+        # Normal extraction
+        # ---------------------------------------------------------------
         expected_results = []
         current_id = None
         current_text = ""
@@ -552,7 +620,7 @@ class Section9StructuredExtractor:
             if itype == "paragraph":
                 if not text:
                     continue
-                if bold and SCENARIO_HEADER_RE.match(text):
+                if cls._is_scenario_header(text, bold):
                     flush()
                     current_id = (bold or "").strip() or text
                     remaining = strip_scenario_header_text(text, bold)
@@ -620,6 +688,12 @@ class Section11StructuredExtractor:
         re.compile(r'TC-(\d+(?:\.\d+){3})'),
         re.compile(r'(\d+(?:\.\d+){3})'),
     ]
+
+    # Regex to match Heading 3 labels (a-e) and their keywords to allow splitting even without colons.
+    _H3_LABEL_RE = re.compile(
+        r'^(([a-e][\s\.\)]\s*)?(test\s*case\s*)?(name|description|execution|observation|evidence)[\w\s]*?[\s\.\-\:]+)',
+        re.IGNORECASE
+    )
 
     @classmethod
     def _extract_tc_id(cls, text: str) -> str:
@@ -722,7 +796,36 @@ class Section11StructuredExtractor:
             if item_type == "paragraph" and style == "Heading 3":
                 current_sub = cls._map_heading3(text)
                 if current_sub:
-                    current_tc["_found_h3s"].add(current_sub)  # record properly-styled H3
+                    current_tc["_found_h3s"].add(current_sub)
+                    # Extract any trailing content from the Heading 3 paragraph itself.
+                    # Try using bold_formatting as the label delimiter.
+                    bold_text = (item.get("bold_formatting") or "").strip()
+                    content_after = ""
+                    if bold_text and text.startswith(bold_text):
+                        content_after = text[len(bold_text):].strip()
+                    elif ":" in text:
+                        # Fallback: split at first colon if label ends with it
+                        _, content_after = text.split(":", 1)
+                        content_after = content_after.strip()
+                    else:
+                        # Aggressive fallback: use regex to find known label patterns
+                        m = cls._H3_LABEL_RE.match(text)
+                        if m:
+                            content_after = text[m.end():].strip()
+
+                    if content_after:
+                        if current_sub == "name":
+                            current_tc["test_case_name"] += content_after + " "
+                        elif current_sub == "description":
+                            current_tc["test_case_description"] += content_after + " "
+                        elif current_sub == "execution":
+                            current_tc["execution"].append({"order": exec_order, "step": content_after})
+                            exec_order += 1
+                        elif current_sub == "observation":
+                            current_tc["test_observation"] += content_after + " "
+                        elif current_sub == "evidence":
+                            current_tc["evidence_provided"].append({"order": evidence_order, "evidence": content_after})
+                            evidence_order += 1
                 continue
 
             if current_sub is None:

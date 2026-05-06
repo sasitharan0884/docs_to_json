@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional, Tuple
 from dataclasses import dataclass
 from lossless_extract import parse_docx
 from structured_extract import StructuredSectionBuilder, validate_frontpage_headings
-from AI_structured_extract import StructuredSectionBuilder as AIStructuredSectionBuilder
+from AI_structured_extract import StructuredSectionBuilder as AIStructuredSectionBuilder, Section9StructuredExtractor as _Sec9Extractor
 from document_split_validator import run_validator
 
 
@@ -555,6 +555,44 @@ def main():
     phase1_sections = validator_result.get("phase1", {}).get("sections", {})
 
     # ------------------------------------------------------------------
+    # Section 9 pre-check — detect unexpected Heading 2 / Heading 3
+    # blocks inside sec9 content and inject them as errors into
+    # sections_result["sec9"] so they appear in output.json.
+    # The structured / ai_structured extractors will be told to suppress
+    # the error block and return clean empty results instead.
+    # ------------------------------------------------------------------
+    _sec9_raw = (validator_result.get("mapped_sections") or {}).get("sec9", [])
+    _sec9_heading_issues: List[Dict[str, Any]] = []
+    if _sec9_raw:
+        _sec9_content_probe = [
+            {
+                "type":             b.get("type", ""),
+                "style":            b.get("style", ""),
+                "text":             b.get("text", ""),
+                "bold_formatting":  b.get("bold_formatting"),
+                "image_path":       b.get("path", ""),
+            }
+            for b in _sec9_raw[1:]  # skip heading block at index 0
+        ]
+        _probe_result = _Sec9Extractor.extract(_sec9_content_probe)
+        _sec9_heading_issues = _probe_result.get("heading_issues", [])
+        if _sec9_heading_issues:
+            # Inject into the validator sections_result so output.json picks them up
+            _sec9_sr = sections_result.setdefault("sec9", {})
+            _existing = list(_sec9_sr.get("issues") or [])
+            for _hi in _sec9_heading_issues:
+                _existing.append({
+                    "type":          _hi["type"],
+                    "severity":      _hi["severity"],
+                    "message":       _hi["message"],
+                    "what":          f"Unexpected {_hi['style']} paragraph found in Section 9: '{_hi['text']}'",
+                    "where":         "9. Expected Results for Pass",
+                    "redirect_text": "9. Expected Results for Pass",
+                    "suggestion":    "Remove or restyle Heading 2 / Heading 3 paragraphs that appear inside Section 9.",
+                })
+            _sec9_sr["issues"] = _existing
+
+    # ------------------------------------------------------------------
     # section_0 — Front Page (blocks before the first H1)
     # If section_1 (sec1) is FAIL/MISSING, the front page end-boundary
     # is unknown, so section_0 also cascades to FAIL.
@@ -1021,6 +1059,17 @@ def main():
             "error": "Front Page end-boundary unknown — Section 1 heading is missing.",
         }
 
+    # Strip Section 9 heading-contamination error block from _structured.json.
+    # Those issues are already surfaced in output.json; keep Section 9 clean here.
+    if _sec9_heading_issues:
+        for _sec in structured_data.get("sections", []):
+            if "Expected Results" in (_sec.get("title") or ""):
+                # Strip all content keys — leave only section_id / title / level
+                # and set status: FAIL (same clean stub as other blocked sections)
+                for _k in [k for k in list(_sec.keys()) if k not in ("section_id", "title", "level")]:
+                    del _sec[_k]
+                _sec["status"] = "FAIL"
+
     structured_path = output_dir / f"{base_name}_structured.json"
     with open(structured_path, "w", encoding="utf-8") as f:
         json.dump(structured_data, f, indent=2, ensure_ascii=False)
@@ -1051,6 +1100,16 @@ def main():
             "status": "FAIL",
             "error": "Front Page end-boundary unknown — Section 1 heading is missing.",
         }
+
+    # Strip Section 9 heading-contamination error block from _ai_structured.json.
+    if _sec9_heading_issues:
+        for _sec in ai_structured_data.get("sections", []):
+            if "Expected Results" in (_sec.get("title") or ""):
+                # Strip all content keys — leave only section_id / title / level
+                # and set status: FAIL (same clean stub as other blocked sections)
+                for _k in [k for k in list(_sec.keys()) if k not in ("section_id", "title", "level")]:
+                    del _sec[_k]
+                _sec["status"] = "FAIL"
 
     ai_structured_path = output_dir / f"{base_name}_ai_structured.json"
     with open(ai_structured_path, "w", encoding="utf-8") as f:

@@ -558,8 +558,80 @@ class Section84StructuredExtractor:
         return {"execution_steps": execution_steps, "total_execution_steps": len(execution_steps)}
 
 class Section9StructuredExtractor:
-    @staticmethod
-    def extract(section_content: List[Dict[str, Any]]) -> Dict[str, Any]:
+    """
+    Section 9:
+    - New expected-result entry when bold_formatting exists (token-only bold)
+    - Remaining text (after removing bold token) belongs to expected_result
+
+    Guards:
+    - If any Heading 2 or Heading 3 paragraph is present in section_content
+      the section boundary is contaminated — returns an error stub and no results.
+
+    Scenario ID matching (broader than module-level SCENARIO_HEADER_RE):
+    - "Test Scenario 1.1.7.4" (standard)
+    - "Test Scenario 1.1.11"  (two-segment dotted suffix)
+    - "Test Scenario:"        (bare label at start of text)
+    """
+
+    # Matches "Test Scenario" or "Test Case" followed by a dotted number with
+    # at least ONE dot (e.g. 1.1, 1.1.7, 1.1.11) — more permissive than the
+    # module-level SCENARIO_HEADER_RE which requires {2,} dot groups.
+    _SCENARIO_ID_RE = re.compile(
+        r"^\s*test\s*(?:scenario|case)s?\s+\d+(?:\.\d+){1,}\b",
+        re.IGNORECASE,
+    )
+
+    # Matches a bare "Test Scenario:" / "Test Case:" label with no number.
+    _SCENARIO_BARE_RE = re.compile(
+        r"^\s*test\s*(?:scenario|case)s?\s*:\s*",
+        re.IGNORECASE,
+    )
+
+    @classmethod
+    def _is_scenario_header(cls, text: str, bold: str) -> bool:
+        """Return True if this paragraph opens a new expected-result entry."""
+        if bold and cls._SCENARIO_ID_RE.match(text):
+            return True
+        if bold and cls._SCENARIO_BARE_RE.match(text):
+            return True
+        return False
+
+    @classmethod
+    def extract(cls, section_content: List[Dict[str, Any]]) -> Dict[str, Any]:
+        # ---------------------------------------------------------------
+        # Guard: Heading 2 / Heading 3 present → boundary contamination
+        # ---------------------------------------------------------------
+        heading_issues = []
+        for item in section_content:
+            if not isinstance(item, dict):
+                continue
+            style = (item.get("style") or "").strip()
+            if style in ("Heading 2", "Heading 3"):
+                heading_issues.append({
+                    "type": "UNEXPECTED_HEADING",
+                    "severity": "HIGH",
+                    "style": style,
+                    "text": (item.get("text") or "").strip(),
+                    "message": (
+                        f"A '{style}' paragraph was found inside Section 9 "
+                        "(Expected Results for Pass). This indicates a boundary "
+                        "issue — test-case sub-headings should not appear here."
+                    ),
+                })
+
+        if heading_issues:
+            return {
+                "status": "FAIL",
+                "error": "Section 9 contains unexpected Heading 2 / Heading 3 paragraphs. "
+                         "Expected-result extraction was skipped to avoid contaminated output.",
+                "heading_issues": heading_issues,
+                "expected_results": [],
+                "total_expected_results": 0,
+            }
+
+        # ---------------------------------------------------------------
+        # Normal extraction
+        # ---------------------------------------------------------------
         expected_results = []
         current_id = None
         current_text = ""
@@ -576,27 +648,25 @@ class Section9StructuredExtractor:
 
         for it in section_content:
             dtype = it.get("type")
-            bold = it.get("bold_formatting")
-            
+            bold  = (it.get("bold_formatting") or "").strip()
+            txt   = (it.get("text") or "").strip()
+
             if dtype == "paragraph":
-                txt = (it.get("text") or "").strip()
                 if not txt:
                     continue
-                
-                if bold and SCENARIO_HEADER_RE.match(txt):
+                if cls._is_scenario_header(txt, bold):
                     flush()
-                    current_id = (bold or "").strip() or txt
+                    current_id = bold or txt
                     remaining = strip_scenario_header_text(txt, bold)
-                    if remaining:
-                        current_text = remaining + " "
+                    current_text = (remaining + " ") if remaining else ""
                     continue
-                
                 if current_id:
                     current_text += txt + " "
             elif dtype == "image" and current_id:
                 current_text += f"[Image: {it.get('image_path', '')}] "
 
         flush()
+
         if not expected_results:
             all_text = " ".join(
                 (it.get("text") or "").strip()
@@ -606,7 +676,11 @@ class Section9StructuredExtractor:
             if all_text:
                 expected_results.append({"test_case_id": "all", "expected_result": all_text})
 
-        return {"expected_results": expected_results, "total_expected_results": len(expected_results)}
+        return {
+            "expected_results": expected_results,
+            "total_expected_results": len(expected_results),
+        }
+
 
 class Section12StructuredExtractor:
     @staticmethod
