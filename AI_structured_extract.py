@@ -1230,6 +1230,9 @@ class StructuredSectionBuilder:
 
         failed_keys = failed_keys or set()
 
+        # Check if Section 9 is missing in Header 1
+        sec9_missing = ("sec9" in failed_keys) or ("sec9" not in mapped_sections)
+
         for key in ORDERED_KEYS:
             raw_slice = mapped_sections.get(key)
             if raw_slice is None:
@@ -1260,6 +1263,14 @@ class StructuredSectionBuilder:
             )
 
             stype = self._get_section_type(canonical_title)
+
+            # GUARD: If Section 9 is missing in Header 1, Section 8 sub-sections must also fail 
+            # to avoid content bleed (since Section 9 content would be inside 8.4).
+            if key.startswith("sec8"):
+                if sec9_missing:
+                    section.structured_data = {"status": "FAIL"}
+                    self.output.sections.append(section)
+                    continue
 
             if stype == "section_8_1":
                 section.structured_data = Section81StructuredExtractor.extract(content)

@@ -549,6 +549,13 @@ def main():
     # Get failed keys early to use them for skipping
     failed_keys = _get_failed_section_keys(validator_result)
 
+    # STRICT DEPENDENCY: If Section 9 is missing/failed in Header 1, Section 8 is invalid 
+    # (because its content likely bled into Section 8.4).
+    if "sec9" in failed_keys or "sec9" not in (validator_result.get("mapped_sections") or {}):
+        for s8_key in ["sec8", "sec8_1", "sec8_2", "sec8_3", "sec8_4"]:
+            if s8_key not in failed_keys:
+                failed_keys.append(s8_key)
+
     structured_sections = []
     all_format_checks = {}
 
