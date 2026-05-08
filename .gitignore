@@ -1,0 +1,7 @@
+*.json
+*.docx
+*_lossless.json
+*_structured.json
+*_ai_structured.json
+extracted_data
+__pycache__
