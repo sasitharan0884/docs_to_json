@@ -63,6 +63,29 @@ SCENARIO_HEADER_RE = re.compile(
     re.IGNORECASE
 )
 
+# Matches bare "Test Scenario: ..." or "Test Case: ..." with no dotted number.
+# Mirrors the same pattern used in AI_structured_extract.py Section9StructuredExtractor.
+_SCENARIO_BARE_RE = re.compile(
+    r"^\s*test\s*(?:scenario|case)s?\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _is_bold_scenario_header(text: str, bold) -> bool:
+    """Return True if *text* opens a new scenario block and is formatted bold.
+
+    Handles both:
+    - Numbered : "Test Scenario 1.9.2.1: ..."
+    - Bare label: "Test Scenario: Verify mutual Authentication."
+    """
+    if not bold:
+        return False
+    if SCENARIO_HEADER_RE.match(text):
+        return True
+    if _SCENARIO_BARE_RE.match(text):
+        return True
+    return False
+
 # -------------------------
 # Helpers
 # -------------------------
@@ -86,24 +109,64 @@ def normalize_test_case_id(value: str) -> str:
     cleaned = re.sub(r'[:;.\s]+$', '', cleaned)
     return cleaned
 
+
+def extract_scenario_id(bold: str, text: str) -> str:
+    """
+    Extract the full scenario label (e.g. 'Test Scenario 1.9.2.1:') 
+    without the subsequent descriptive text.
+    """
+    raw = (bold or "").strip() or text.strip()
+    
+    # 1. Try to match the standard numbered prefix
+    m = SCENARIO_HEADER_RE.match(raw)
+    if m:
+        prefix = m.group(0).strip()
+        # Check if a colon immediately follows the match
+        after_match = raw[m.end():]
+        if after_match.startswith(":"):
+            return prefix + ":"
+        return prefix
+
+    # 2. Try bare label prefix
+    m_bare = _SCENARIO_BARE_RE.match(raw)
+    if m_bare:
+        return m_bare.group(0).strip()
+
+    # Fallback: cleaned version of the start of the line
+    token = (bold or "").strip()
+    if token and len(token) < 50:
+        return token
+    
+    # Very aggressive fallback: take text before first colon
+    if ":" in raw:
+        return raw.split(":")[0].strip() + ":"
+    return raw.strip()
+
 def strip_scenario_header_text(text: str, bold_token: Optional[str]) -> str:
     """Return the body text after a scenario header, handling spacing/punctuation variations."""
     raw = (text or "").strip()
     if not raw:
         return ""
 
-    token = (bold_token or "").strip()
-    remainder = raw
+    # 1. Try numeric ID boundary first
+    m = SCENARIO_HEADER_RE.match(raw)
+    if m:
+        remainder = raw[m.end():].strip()
+        return re.sub(r'^[:\-\s]+', '', remainder).strip()
 
+    # 2. Try bare label boundary
+    m_bare = _SCENARIO_BARE_RE.match(raw)
+    if m_bare:
+        remainder = raw[m_bare.end():].strip()
+        return re.sub(r'^[:\-\s]+', '', remainder).strip()
+
+    # 3. Fallback to bold token stripping
+    token = (bold_token or "").strip()
     if token and raw.lower().startswith(token.lower()):
         remainder = raw[len(token):].strip()
-    else:
-        # Fallback to regex match when bold token and text differ slightly.
-        m = SCENARIO_HEADER_RE.match(raw)
-        if m:
-            remainder = raw[m.end():].strip()
+        return re.sub(r'^[:\-\s]+', '', remainder).strip()
 
-    return re.sub(r'^[:\-\s]+', '', remainder).strip()
+    return ""
 
 
 def strip_leading_bullet_symbol(text: str) -> str:
@@ -460,9 +523,9 @@ class Section81StructuredExtractor:
                 if not text:
                     continue
                 
-                if bold and SCENARIO_HEADER_RE.match(text):
+                if _is_bold_scenario_header(text, bold):
                     flush()
-                    current_scenario = (bold or "").strip() or text
+                    current_scenario = extract_scenario_id(bold, text)
                     remaining = strip_scenario_header_text(text, bold)
                     if remaining:
                         current_desc = remaining + " "
@@ -535,9 +598,9 @@ class Section84StructuredExtractor:
                     continue
                 
                 # Boundary detection: only bold matching scenario header pattern
-                if bold and SCENARIO_HEADER_RE.match(txt):
+                if _is_bold_scenario_header(txt, bold):
                     flush()
-                    current_scenario = (bold or "").strip() or txt
+                    current_scenario = extract_scenario_id(bold, txt)
                     remaining = strip_scenario_header_text(txt, bold)
                     if remaining:
                         current_steps.append({"step": remaining, "order": order})
@@ -656,7 +719,7 @@ class Section9StructuredExtractor:
                     continue
                 if cls._is_scenario_header(txt, bold):
                     flush()
-                    current_id = bold or txt
+                    current_id = extract_scenario_id(bold, txt)
                     remaining = strip_scenario_header_text(txt, bold)
                     current_text = (remaining + " ") if remaining else ""
                     continue

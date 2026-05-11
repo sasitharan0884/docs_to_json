@@ -79,6 +79,23 @@ SCENARIO_HEADER_RE = re.compile(
     re.IGNORECASE
 )
 
+# Matches bare "Test Scenario: ..." or "Test Case: ..." with no dotted number.
+_SCENARIO_BARE_RE = re.compile(
+    r"^\s*test\s*(?:scenario|case)s?\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _is_bold_scenario_header(text: str, bold: str) -> bool:
+    """Return True if *text* opens a new scenario block and is formatted bold."""
+    if not bold:
+        return False
+    if SCENARIO_HEADER_RE.match(text):
+        return True
+    if _SCENARIO_BARE_RE.match(text):
+        return True
+    return False
+
 # Detect malformed scenario headers where there is no space before the id,
 # e.g. "TestScenario1.1.1.1" or "Test Case1.1.1.1".
 SCENARIO_HEADER_NO_SPACE_RE = re.compile(
@@ -106,7 +123,7 @@ def collect_scenario_headers_in_range(
         if not bold:
             continue
         text = (b.get("text") or "").strip()
-        if SCENARIO_HEADER_RE.match(text):
+        if _is_bold_scenario_header(text, bold):
             valid_headers.append(bold)
         elif SCENARIO_HEADER_NO_SPACE_RE.match(text):
             malformed_no_space_headers.append(text)
@@ -184,7 +201,8 @@ def _get_failed_section_keys(validator_result: Dict[str, Any]) -> List[str]:
     for sec_key, sec_info in sections.items():
         validation = (sec_info.get("validation") or "").upper()
         extraction = (sec_info.get("extraction") or "").upper()
-        if validation == "FAIL" or extraction in ("BLOCKED", "SKIPPED"):
+        # ✅ Also treat BOUNDARY_BROKEN as a failed key
+        if validation in ("FAIL", "BOUNDARY_BROKEN") or extraction in ("BLOCKED", "SKIPPED"):
             failed.append(sec_key)
             
         # Check sub-sections (like sec8_1, sec8_2)
@@ -478,10 +496,25 @@ def build_checklist_output(
 
 def main():
     if len(sys.argv) < 2:
-        print("Usage: python extract_document.py <input.docx>")
+        print("Usage: python extract_document.py <input.docx> [section_N=\"check_name\" ...]")
         sys.exit(1)
 
     file_path = Path(sys.argv[1])
+
+    # Parse custom section alerts from command line: Section_6="DUT Hash Check" Section_7="DUT Hash Check"
+    custom_alerts_to_check = {}  # Mapping of sec_key -> List[check_name]
+    for arg in sys.argv[2:]:
+        if "=" in arg:
+            key, val = arg.split("=", 1)
+            # Normalize Section_6 -> sec6
+            m = re.match(r"section_(\d+)", key, re.I)
+            if m:
+                sec_num = m.group(1)
+                sec_key = f"sec{sec_num}"
+                check_name = val.strip('"').strip("'")
+                if sec_key not in custom_alerts_to_check:
+                    custom_alerts_to_check[sec_key] = []
+                custom_alerts_to_check[sec_key].append(check_name)
     if not file_path.exists():
         print(f"Error: File not found: {file_path}")
         sys.exit(1)
@@ -659,8 +692,6 @@ def main():
             "where":         "Front Page",
             "redirect_text": "Front Page",
             "what":          f"Missing required Heading 2 field(s): {', '.join(missing_labels)}",
-            "missing_fields": missing_labels,
-            "found_order":    _fp_h2_result.get("found_order", []),
         })
 
     section0_status   = "FAIL" if section0_errors else "PASS"
@@ -841,6 +872,24 @@ def main():
         ],
         "sections": structured_sections
     }
+
+    # Add section_alert if monitored sections failed
+    active_alerts = []
+    for sec_key, check_names in custom_alerts_to_check.items():
+        if sec_key in failed_keys:
+            # Find the section name from our expected list (e.g., "6. Preconditions")
+            sec_name = next((name for k, name in _EXPECTED_SECTIONS if k == sec_key), sec_key)
+
+            # Create an alert for each check assigned to this failed section
+            for check_name in check_names:
+                active_alerts.append({
+                    "section_name": sec_name,
+                    "check_name": check_name,
+                    "issue": f"{sec_name} fail for the {check_name}. This section will be skipped for the check."
+                })
+
+    if active_alerts:
+        structured_output["section_alert"] = active_alerts
 
     output_json_path = output_dir / "output.json"
     with open(output_json_path, "w", encoding="utf-8") as f:

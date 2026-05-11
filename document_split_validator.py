@@ -88,6 +88,23 @@ SCENARIO_HEADER_RE = re.compile(
     re.IGNORECASE,
 )
 
+# Matches bare "Test Scenario: ..." or "Test Case: ..." with no dotted number.
+_SCENARIO_BARE_RE = re.compile(
+    r"^\s*test\s*(?:scenario|case)s?\s*:\s*",
+    re.IGNORECASE,
+)
+
+
+def _is_bold_scenario_header(text: str, bold: str) -> bool:
+    """Return True if *text* opens a new scenario block and is formatted bold."""
+    if not bold:
+        return False
+    if SCENARIO_HEADER_RE.match(text):
+        return True
+    if _SCENARIO_BARE_RE.match(text):
+        return True
+    return False
+
 # ---------------------------------------------------------------------------
 # NORMALISATION HELPERS
 # ---------------------------------------------------------------------------
@@ -444,7 +461,7 @@ class SplitMap:
 
             self.section_dict[tc_key] = {
                 "expected_name": f"Test Case {j+1}",
-                "found_heading": group["heading_token"]["text"] if group["heading_token"] else f"Orphan (Starts at {tokens[0]['text'][:20]}...)",
+                "found_heading": group["heading_token"]["text"] if group["heading_token"] else "A properly formatted 'Heading 2' test case number is missing before the test case content.",
                 "status": status,
                 "start_bid": tokens[0]["bid"],
                 "end_bid": self.blocks[idx_end]["block_id"],
@@ -540,13 +557,17 @@ class SplitMap:
 # PHASE 1 — HEADING STRUCTURE VALIDATION
 # ---------------------------------------------------------------------------
 
-def _make_issue(itype: str, severity: str, message: str, suggestion: str = "") -> Dict:
-    return {
+def _make_issue(itype: str, severity: str, message: str, suggestion: str = "", where: str = "", what: str = "", redirect_text: str = "") -> Dict:
+    res = {
         "type": itype,
         "severity": severity,
         "message": message,
         "suggestion": suggestion,
     }
+    if where: res["where"] = where
+    if what: res["what"] = what
+    if redirect_text: res["redirect_text"] = redirect_text
+    return res
 
 
 def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
@@ -574,10 +595,14 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
 
         # 1. H1 presence
         if status_from_splitter == "MISSING":
+            full_name = f"{num}. {name}"
             issues.append(_make_issue(
                 "MISSING_H1", "HIGH",
-                f"Heading 1 for section '{num}. {name}' was not found.",
-                f"Add a Heading 1 titled '{num}. {name}' following the template.",
+                f"Heading 1 for section '{full_name}' was not found.",
+                f"Add the section using the exact title '{full_name}' and apply Heading 1 formatting.",
+                where=full_name,
+                what=f"The required section '{full_name}' is missing or not formatted using Heading 1 style.",
+                redirect_text=full_name
             ))
             sections[key] = {
                 "status": "FAIL",
@@ -593,29 +618,40 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
 
         # 2. Number prefix check
         if not _has_number_prefix(found_heading, num):
+            full_name = f"{num}. {name}"
             issues.append(_make_issue(
                 "MISSING_NUMBER_PREFIX", "WARN",
-                f"Expected numbering '{num}.' before '{name}', "
-                f"found: '{found_heading}'.",
+                f"Expected numbering '{num}.' before '{name}', found: '{found_heading}'.",
                 f"Update the heading to start with '{num}. {name}'.",
+                where=full_name,
+                what=f"Section heading '{found_heading}' is missing the required '{num}.' number prefix.",
+                redirect_text=full_name
             ))
 
         # 2b. Master Design: Boundary Uncertainty check
         if status_from_splitter == "BOUNDARY_BROKEN":
+            full_name = f"{num}. {name}"
             next_num = EXPECTED_H1[i + 1]["num"] if i + 1 < len(EXPECTED_H1) else "?"
             next_name = EXPECTED_H1[i + 1]["name"] if i + 1 < len(EXPECTED_H1) else "Next Section"
             issues.append(_make_issue(
                 "INVALID_BOUNDARY", "HIGH",
                 f"The next expected section '{next_num}. {next_name}' is missing, so the end of this section cannot be reliably determined.",
                 f"Ensure '{next_num}. {next_name}' is present so this section can be correctly bounded.",
+                where=full_name,
+                what=f"Section boundary for '{full_name}' is broken due to the absence of the subsequent section heading.",
+                redirect_text=full_name
             ))
 
         # 2c. Ambiguity check
         if status_from_splitter == "AMBIGUOUS":
+            full_name = f"{num}. {name}"
             issues.append(_make_issue(
                 "AMBIGUOUS_HEADING", "WARN",
                 f"Multiple Heading 1s matching '{name}' were found. Using the first occurrence at block {sec_info['start_bid']}.",
                 "Remove duplicate headings so the structure is unique.",
+                where=full_name,
+                what=f"Found multiple Heading 1 paragraphs matching the '{full_name}' section criteria.",
+                redirect_text=full_name
             ))
 
         # 3. Section-8 H2 children
@@ -633,10 +669,14 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
                         "num_prefix": _has_number_prefix(sub_info["found_heading"], es8["num"]),
                     }
                     if sub_info["status"] == "BOUNDARY_BROKEN":
-                         issues.append(_make_issue(
+                        full_sub_name = f"{es8['num']}. {es8['name']}"
+                        issues.append(_make_issue(
                             "INVALID_SUB_BOUNDARY", "MEDIUM",
-                            f"Subsection '{es8['num']}. {es8['name']}' has an uncertain end boundary.",
-                            "Ensure the following subsection exists."
+                            f"Subsection '{full_sub_name}' has an uncertain end boundary.",
+                            "Ensure the following subsection exists to correctly bound this content.",
+                            where=full_sub_name,
+                            what=f"The end of subsection '{full_sub_name}' cannot be determined because the subsequent heading is missing.",
+                            redirect_text=full_sub_name
                         ))
                 else:
                     h2_children[sub_key] = {
@@ -644,10 +684,14 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
                         "expected": f"{es8['num']}. {es8['name']}",
                         "found": None,
                     }
+                    full_sub_name = f"{es8['num']}. {es8['name']}"
                     issues.append(_make_issue(
                         "MISSING_H2", "HIGH",
-                        f"Section 8 is missing H2 subsection '{es8['num']}. {es8['name']}'.",
-                        f"Add Heading 2 '{es8['num']}. {es8['name']}' inside Test Plan.",
+                        f"Heading 2 for subsection '{full_sub_name}' was not found.",
+                        f"Add the subsection using the exact title '{full_sub_name}' and apply Heading 2 formatting.",
+                        where=full_sub_name,
+                        what=f"The required subsection '{full_sub_name}' is missing or not formatted using Heading 2 style.",
+                        redirect_text=full_sub_name
                     ))
             heading_tree["h2_children"] = h2_children
 
@@ -678,12 +722,15 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
                         issues.append(_make_issue(
                             "INVALID_HEADING_STYLE", "MEDIUM",
                             f"Test case heading '{tc_info['found_heading']}' is not styled as 'Heading 2'.",
-                            "Apply the 'Heading 2' style to this test case number."
+                            "Apply the 'Heading 2' style to this test case number.",
+                            where=tc_info['found_heading'],
+                            what=f"Test case identifier '{tc_info['found_heading']}' is present but lacks 'Heading 2' styling.",
+                            redirect_text=tc_info['found_heading']
                         ))
 
                     if tc_info.get("orphan"):
                         tc_status = "FAIL"
-                        tc_issues.append("Missing H2 heading (recovered as orphan)")
+                        tc_issues.append("A properly formatted 'Heading 2' test case number is missing before the test case content.")
 
                     # Phase 3 & 4: Validate H3 Presence, Order, Duplicates
                     h3_sequence = [] # List of (key, token)
@@ -790,26 +837,43 @@ def validate_phase1(blocks: List[Dict], split_map: SplitMap) -> Dict[str, Any]:
                     ]
                     
                     if len(norm_headers) < 4:
+                        full_name = f"{num}. {name}"
                         issues.append(_make_issue(
                             "INVALID_SEC12_HEADERS", "HIGH",
                             f"Section 12 table expected at least 4 columns, found {len(norm_headers)}.",
-                            "Ensure the table has Test Case No, Name, Result, and Remarks columns."
+                            "Add all mandatory columns to the results table, including 'Test Case No', 'Test Case Name', 'Result', and 'Remarks'.",
+                            where=full_name,
+                            what="The Section 12 results table is missing one or more required columns.",
+                            redirect_text=full_name
                         ))
                     else:
                         for idx, concepts in enumerate(expected_concepts):
                             found_h_norm = norm_headers[idx]
                             found_h_raw  = raw_headers[idx]
                             if not any(c == found_h_norm for c in concepts):
+                                full_name = f"{num}. {name}"
                                 issues.append(_make_issue(
                                     "INVALID_SEC12_HEADERS", "HIGH",
-                                    f"Column {idx+1} header '{found_h_raw}' does not match expected concept: {concepts[0]}.",
-                                    f"Rename column {idx+1} to strictly match '{concepts[0]}' or a close variant."
+                                    f"Column {idx+1} header '{found_h_raw}' does not match expected concept.",
+                                    f"Update the table header '{found_h_raw}' to '{concepts[0]}'.",
+                                    where=full_name,
+                                    what=f"The column header '{found_h_raw}' in the Section 12 results table does not match the required header name.",
+                                    redirect_text=full_name
                                 ))
 
         # Derive status (Master Design alignment)
         # 1. If splitter already flagged it, prioritize that
+        # Treat BOUNDARY_BROKEN exactly like FAIL — it must NOT allow extraction
         if status_from_splitter in ("MISSING", "BOUNDARY_BROKEN", "AMBIGUOUS", "INCOMPLETE"):
-            status = status_from_splitter
+            status = status_from_splitter  # already propagated
+            if status_from_splitter == "BOUNDARY_BROKEN":
+                # Explicitly record it will be BLOCKED downstream
+                issues.append(_make_issue(
+                    "BOUNDARY_BROKEN", "HIGH",
+                    f"Section {num}. {name} has a broken boundary because the next "
+                    f"section is missing. Its blocks absorb the missing section's content.",
+                    f"Add a Heading 1 for the missing next section to restore the boundary."
+                ))
         else:
             # 2. Check for other validation issues (H3 missing etc)
             high = [i for i in issues if i["severity"] == "HIGH"]
@@ -921,7 +985,7 @@ def _collect_scenario_blocks(content: List[Dict]) -> List[Dict]:
         text = (it.get("text") or "").strip()
         if not text:
             continue
-        if bold and SCENARIO_HEADER_RE.match(text):
+        if _is_bold_scenario_header(text, bold):
             flush()
             current = bold or text
             rest = text[len(bold):].lstrip(": -") if text.lower().startswith(bold.lower()) else ""
@@ -1229,8 +1293,25 @@ def run_validator(lossless_data):
             print(f"   [SKIP]  {sec_key} -> MISSING")
             continue
 
+        # ✅ NEW: BOUNDARY_BROKEN is now treated as FAIL — blocks extraction
+        if p1_status == "BOUNDARY_BROKEN":
+            unified_sections[sec_key] = {
+                "section": f"{num}. {name}",
+                "block_range": block_range,
+                "validation": "BOUNDARY_BROKEN",
+                "issues": p1_issues,
+                "heading_tree": heading_tree,
+                "extraction": "BLOCKED",
+                "extracted_data": None,
+                "skip_reason": (
+                    f"Extraction blocked: boundary is broken because the next "
+                    f"expected section is missing. Blocks may be contaminated."
+                ),
+            }
+            print(f"   [BLOCK] {sec_key} -> BOUNDARY_BROKEN (extraction blocked)")
+            continue
+
         # Section present but Phase 1 FAIL (e.g. critical structural error)
-        # Note: BOUNDARY_BROKEN is allowed to proceed to extraction
         if p1_status == "FAIL":
             unified_sections[sec_key] = {
                 "section": f"{num}. {name}",
