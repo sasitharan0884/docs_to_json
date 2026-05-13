@@ -791,7 +791,7 @@ _H3_SLOT_RE = [
     ("test_case_name",        re.compile(r"^a[\s\.\)]", re.I)),
     ("test_case_description", re.compile(r"^b[\s\.\)]", re.I)),
     ("execution_steps",       re.compile(r"^c[\s\.\)]", re.I)),
-    ("test_observations",     re.compile(r"^d[\s\.\)]", re.I)),
+    ("test_observation",      re.compile(r"^d[\s\.\)]", re.I)),
     ("evidence_provided",     re.compile(r"^e[\s\.\)]", re.I)),
 ]
 
@@ -802,7 +802,7 @@ def _split_tc_by_subsection(tc_slice: list) -> dict:
     return a dict with these keys (all values are lists of content items):
 
         test_case_id, test_case_name, test_case_description,
-        execution_steps, test_observations, evidence_provided
+        execution_steps, test_observation, evidence_provided
 
     H3 heading paragraphs are included as the FIRST item of each group
     (preserving the exact label text, e.g. "a. Test Case Name: ").
@@ -813,7 +813,7 @@ def _split_tc_by_subsection(tc_slice: list) -> dict:
         "test_case_name":        [],
         "test_case_description": [],
         "execution_steps":       [],
-        "test_observations":     [],
+        "test_observation":      [],
         "evidence_provided":     [],
     }
     current_key = "test_case_id"
@@ -833,7 +833,10 @@ def _split_tc_by_subsection(tc_slice: list) -> dict:
             if matched:
                 current_key = matched
                 # Include the heading text as the first item of this group
-                result[current_key].append({"type": "paragraph", "text": text})
+                if current_key == "test_observation":
+                    result[current_key].append({"observation": text})
+                else:
+                    result[current_key].append({"type": "paragraph", "text": text})
             # Unrecognised H3: ignore (don't change current_key)
             continue
 
@@ -845,18 +848,30 @@ def _split_tc_by_subsection(tc_slice: list) -> dict:
             if prefix and full_text and not full_text.startswith(prefix):
                 full_text = f"{prefix} {full_text}"
             if full_text.strip():
-                result[current_key].append({"type": "paragraph", "text": full_text})
+                if current_key == "test_observation":
+                    result[current_key].append({"observation": full_text})
+                else:
+                    result[current_key].append({"type": "paragraph", "text": full_text})
 
         elif btype == "table":
             rows = b.get("rows", [])
             if rows and len(rows) >= 2:
-                result[current_key].append({
-                    "type":    "table",
-                    "headers": [str(c).strip() for c in rows[0]],
-                    "rows":    [[str(c).strip() for c in r] for r in rows[1:]],
-                })
+                if current_key == "test_observation":
+                    result[current_key].append({
+                        "type":  "table",
+                        "table": [[str(c).strip() for c in r] for r in rows],
+                    })
+                else:
+                    result[current_key].append({
+                        "type":    "table",
+                        "headers": [str(c).strip() for c in rows[0]],
+                        "rows":    [[str(c).strip() for c in r] for r in rows[1:]],
+                    })
             elif rows:
-                result[current_key].append({"type": "table", "rows": rows})
+                if current_key == "test_observation":
+                    result[current_key].append({"type": "table", "table": rows})
+                else:
+                    result[current_key].append({"type": "table", "rows": rows})
 
         elif btype == "image":
             img_path = b.get("path", "")
@@ -1424,7 +1439,7 @@ class StructuredSectionBuilder:
 
                         # Organise content by H3 subsection labels
                         # (test_case_id, test_case_name, test_case_description,
-                        #  execution_steps, test_observations, evidence_provided)
+                        #  execution_steps, test_observation, evidence_provided)
                         tc_sec.structured_data = _split_tc_by_subsection(tc_slice)
                         self.output.sections.append(tc_sec)
 

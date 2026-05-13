@@ -418,7 +418,7 @@ class Section4StructuredExtractor:
 class Section5StructuredExtractor:
     @staticmethod
     def extract(section_content: List[Dict]) -> Dict[str, Any]:
-        lines = []
+        dut_configuration = []
         for item in section_content:
             if not isinstance(item, dict):
                 continue
@@ -426,14 +426,26 @@ class Section5StructuredExtractor:
             if item_type == "paragraph":
                 text = (item.get("text") or "").strip()
                 if text:
-                    lines.append(text)
+                    dut_configuration.append({"type": "paragraph", "text": text})
             elif item_type == "table":
                 rows = item.get("rows", [])
-                for row in rows:
-                    row_text = " | ".join([str(cell).strip() for cell in row if cell is not None]).strip()
-                    if row_text:
-                        lines.append(row_text)
-        return {"dut_configuration": "\n".join(lines).strip()}
+                if not rows or len(rows) < 2:
+                    # If it's a simple table, maybe just rows? 
+                    # But Section 4 style uses headers/rows.
+                    if rows:
+                        dut_configuration.append({
+                            "type": "table",
+                            "rows": [[cell.strip() if cell else "" for cell in row] for row in rows]
+                        })
+                    continue
+                dut_configuration.append({
+                    "type": "table",
+                    "headers": [str(cell).strip() for cell in rows[0]],
+                    "rows": [[str(cell).strip() for cell in row] for row in rows[1:]],
+                })
+            elif item_type == "image":
+                dut_configuration.append({"type": "image", "image_path": item.get("image_path", "")})
+        return {"dut_configuration": dut_configuration}
 
 
 class Section6StructuredExtractor:
@@ -810,7 +822,7 @@ class Section11StructuredExtractor:
                 "test_case_name": "",
                 "test_case_description": "",
                 "execution": [],
-                "test_observation": "",
+                "test_observation": [],
                 "evidence_provided": [],
                 "_found_h3s": set(),  # tracks properly-styled H3 slots
             }
@@ -834,7 +846,7 @@ class Section11StructuredExtractor:
             else:
                 current_tc["test_case_name"]        = current_tc["test_case_name"].strip()
                 current_tc["test_case_description"] = current_tc["test_case_description"].strip()
-                current_tc["test_observation"]      = current_tc["test_observation"].strip()
+                # current_tc["test_observation"]      = current_tc["test_observation"].strip() # No longer a string
                 current_tc.pop("_found_h3s", None)
                 test_cases.append(current_tc)
 
@@ -886,7 +898,7 @@ class Section11StructuredExtractor:
                             current_tc["execution"].append({"order": exec_order, "step": content_after})
                             exec_order += 1
                         elif current_sub == "observation":
-                            current_tc["test_observation"] += content_after + " "
+                            current_tc["test_observation"].append({"observation": content_after})
                         elif current_sub == "evidence":
                             current_tc["evidence_provided"].append({"order": evidence_order, "evidence": content_after})
                             evidence_order += 1
@@ -917,7 +929,11 @@ class Section11StructuredExtractor:
                     exec_order += 1
             elif current_sub == "observation":
                 if item_type == "paragraph" and text:
-                    current_tc["test_observation"] += text + " "
+                    current_tc["test_observation"].append({"observation": text})
+                elif item_type == "image":
+                    current_tc["test_observation"].append({"type": "image", "image_path": item.get("image_path", "")})
+                elif item_type == "table":
+                    current_tc["test_observation"].append({"type": "table", "table": item.get("rows", [])})
             elif current_sub == "evidence":
                 if item_type == "paragraph" and text:
                     current_tc["evidence_provided"].append({"order": evidence_order, "evidence": text})
